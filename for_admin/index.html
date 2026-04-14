@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PetID Admin Workspace</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="hero">
+      <div>
+        <p class="eyebrow">PetID Operations Console</p>
+        <h1>Seed-Driven Daily Classification</h1>
+        <p class="subtitle">초기 등록/일자별 수집 이미지 관리, 반자동 분류 검수, 이미지 기반 정렬</p>
+      </div>
+      <label class="api-base">API Base<input id="apiBase" type="text" /></label>
+    </header>
+
+    <main class="dashboard">
+      <aside class="sidebar">
+        <section class="panel" id="workspacePanel">
+          <div class="panel-head">
+            <h2>Workspace</h2>
+            <button id="btnLoadWorkspace" class="primary">불러오기</button>
+          </div>
+          <input id="workspaceDate" type="hidden" />
+          <div class="workspace-date-picker" id="workspaceDatePicker">
+            <button id="btnWorkspaceDateToggle" type="button" class="workspace-date-trigger" aria-expanded="false" aria-controls="workspaceCalendarPopover">
+              <span class="workspace-date-trigger-label">DATE</span>
+              <strong id="workspaceDateDisplay">-</strong>
+            </button>
+            <div id="workspaceCalendarPopover" class="workspace-calendar-popover" hidden>
+              <div class="workspace-calendar-head">
+                <button id="btnCalendarPrevMonth" type="button" aria-label="이전 달">&lt;</button>
+                <div>
+                  <div class="workspace-calendar-label">Date</div>
+                  <strong id="calendarMonthLabel">-</strong>
+                </div>
+                <button id="btnCalendarNextMonth" type="button" aria-label="다음 달">&gt;</button>
+              </div>
+              <div class="workspace-calendar-weekdays">
+                <span>일</span><span>월</span><span>화</span><span>수</span><span>목</span><span>금</span><span>토</span>
+              </div>
+              <div id="calendarGrid" class="workspace-calendar-grid"></div>
+            </div>
+          </div>
+          <div id="workspaceMeta" class="meta"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Registration</h2>
+          </div>
+          <div class="registration-stack">
+            <div class="stack-form grouped-form upload-card">
+              <div class="group-head">
+                <div class="group-title-row">
+                  <p class="eyebrow small-eyebrow">Single Seed</p>
+                  <div class="help-anchor">
+                    <button type="button" class="help-trigger" data-help-target="helpSingleSeed" aria-expanded="false" aria-controls="helpSingleSeed">?</button>
+                    <div id="helpSingleSeed" class="help-popover" hidden>
+                      <strong>설명</strong>
+                      <p>기존 pet에 seed를 추가하거나, 새 pet을 생성하는 두 가지 모드로 등록합니다.</p>
+                      <p>같은 pet에 이미지를 더 넣을 때는 <code>기존 pet에 추가</code>를 사용하세요.</p>
+                      <p>Exemplar는 query/reference 이미지셋이므로 단일 개체가 선명하게 나온 이미지를 권장합니다.</p>
+                    </div>
+                  </div>
+                </div>
+                <div class="meta">같은 pet에 추가할지, 새 pet을 만들지 먼저 선택</div>
+              </div>
+              <div class="seed-mode-toggle" role="tablist" aria-label="Single Seed 등록 모드">
+                <button id="btnSingleSeedAppendMode" type="button" class="seed-mode-button is-active" data-mode="append">기존 pet에 추가</button>
+                <button id="btnSingleSeedCreateMode" type="button" class="seed-mode-button" data-mode="create">새 pet 생성</button>
+              </div>
+              <label id="singleSeedExistingWrap">기존 Pet<select id="uExistingPet"></select></label>
+              <label id="singleSeedNewWrap" hidden>Pet Name<input id="uPetName" placeholder="예시: 초코" /></label>
+              <label>Seed Image<input id="uFile" type="file" accept="image/*" /></label>
+              <button id="btnQuickUpload">등록</button>
+            </div>
+
+            <div class="stack-form grouped-form upload-card">
+              <div class="group-head">
+                <div class="group-title-row">
+                  <p class="eyebrow small-eyebrow">Folder Seed Upload</p>
+                  <div class="help-anchor">
+                    <button type="button" class="help-trigger" data-help-target="helpFolderSeed" aria-expanded="false" aria-controls="helpFolderSeed">?</button>
+                    <div id="helpFolderSeed" class="help-popover" hidden>
+                      <strong>설명</strong>
+                      <p>폴더명 기준으로 여러 펫의 seed 이미지를 한 번에 등록합니다.</p>
+                      <p>폴더 구조는 <code>root/pet_name/image.jpg</code> 형태를 권장합니다.</p>
+                      <p>Exemplar는 query/reference 이미지셋이므로 각 이미지에 단일 개체가 선명하게 보이는 구성을 권장합니다.</p>
+                      <p><code>기존 pet에 추가</code>는 같은 이름이 있으면 그 pet에 이어 붙이고, <code>새 pet 생성</code>은 suffix를 붙여 새 pet으로 만듭니다. <code>중복 이름이면 등록 중단</code>은 충돌 시 실패 처리합니다.</p>
+                      <p>예시:</p>
+                      <pre class="help-tree">root/
+  뽀미/
+    xxx.jpg
+    xxx.png
+  초코/
+    xxx.jpg
+    xxx.jpeg</pre>
+                    </div>
+                  </div>
+                </div>
+                <div class="meta">폴더 구조를 읽어 pet별 seed exemplar를 일괄 등록</div>
+              </div>
+              <div class="group-subtitle">중복 이름 처리</div>
+              <div class="seed-mode-toggle" role="tablist" aria-label="Folder Seed 중복 이름 처리 정책">
+                <button id="btnFolderPolicyAppend" type="button" class="seed-mode-button is-active" data-policy="append">기존 pet에 추가</button>
+                <button id="btnFolderPolicyCreate" type="button" class="seed-mode-button" data-policy="create_new">새 pet 생성</button>
+                <button id="btnFolderPolicyFail" type="button" class="seed-mode-button" data-policy="fail">중복 이름이면 등록 중단</button>
+              </div>
+              <label>Folder Seed Upload<input id="fFolder" type="file" webkitdirectory directory multiple /></label>
+              <button id="btnFolderUpload">폴더 일괄 등록</button>
+            </div>
+
+            <div class="stack-form grouped-form upload-card">
+              <div class="group-head">
+                <div class="group-title-row">
+                  <p class="eyebrow small-eyebrow">Daily Upload</p>
+                  <div class="help-anchor">
+                    <button type="button" class="help-trigger" data-help-target="helpDailyUpload" aria-expanded="false" aria-controls="helpDailyUpload">?</button>
+                    <div id="helpDailyUpload" class="help-popover" hidden>
+                      <strong>설명</strong>
+                      <p>daily 이미지를 한 장 혹은 여러 장 올려 분류 플로우를 진행할 수 있습니다.</p>
+                      <p>Daily는 단일/복수 개체 이미지 모두 허용합니다.</p>
+                      <p>업로드 후에는 '전체' 또는 '미분류' 탭에서 바로 확인할 수 있습니다.</p>
+                    </div>
+                  </div>
+                </div>
+                <div class="meta">수집 이미지 업로드</div>
+              </div>
+              <label>Daily Upload<input id="dFiles" type="file" accept="image/*" multiple /></label>
+              <button id="btnDailyUpload">Daily 업로드</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Daily Ops</h2>
+          </div>
+          <div class="grid one">
+            <label>
+              <span class="field-help-row">
+                <span>Auto Accept</span>
+                <span class="help-anchor">
+                  <button type="button" class="help-trigger" data-help-target="helpAutoAccept" aria-expanded="false" aria-controls="helpAutoAccept">?</button>
+                  <span id="helpAutoAccept" class="help-popover help-popover-right" hidden>
+                    <strong>설명</strong>
+                    <p>자동 분류에서 즉시 ACCEPT 처리할 최소 score 기준입니다.</p>
+                    <p>값이 높을수록 보수적으로 확정합니다.</p>
+                  </span>
+                </span>
+              </span>
+              <input id="autoAcceptThreshold" type="number" step="0.01" min="0" max="1" value="0.6" />
+            </label>
+          </div>
+          <div class="inline-actions wrap daily-ops-actions">
+            <span class="action-help-group">
+              <button id="btnFinalize">버킷 확정</button>
+              <span class="help-anchor">
+                <button type="button" class="help-trigger" data-help-target="helpFinalize" aria-expanded="false" aria-controls="helpFinalize">?</button>
+                <span id="helpFinalize" class="help-popover help-popover-right" hidden>
+                  <strong>설명</strong>
+                  <p>현재 날짜의 ACCEPT 결과를 pet별 버킷으로 고정하고 manifest를 저장합니다.</p>
+                </span>
+              </span>
+            </span>
+            <span class="action-help-group">
+              <button id="btnDownloadZip" type="button" onclick="window.handleDownloadZip && window.handleDownloadZip()">ZIP 다운로드</button>
+              <span class="help-anchor">
+                <button type="button" class="help-trigger" data-help-target="helpDownloadZip" aria-expanded="false" aria-controls="helpDownloadZip">?</button>
+                <span id="helpDownloadZip" class="help-popover" hidden>
+                  <strong>설명</strong>
+                  <p>가장 최근에 확정한 버킷 기준으로 ZIP 파일을 내려받습니다.</p>
+                </span>
+              </span>
+            </span>
+            <span class="action-help-group">
+              <button id="btnDownloadDailyZip" type="button">Daily 다운로드</button>
+              <span id="dailyDownloadMenu" class="mini-action-menu" hidden>
+                <button id="btnDownloadDailyAll" type="button">모두 다운로드</button>
+                <button id="btnDownloadDailyAccepted" type="button">ACCEPTED 포함만</button>
+              </span>
+              <span class="help-anchor">
+                <button type="button" class="help-trigger" data-help-target="helpDownloadDailyZip" aria-expanded="false" aria-controls="helpDownloadDailyZip">?</button>
+                <span id="helpDownloadDailyZip" class="help-popover" hidden>
+                  <strong>설명</strong>
+                  <p>Daily ZIP은 해당 날짜 폴더 아래 이미지와 짝이 되는 <code>_anno.json</code>을 함께 제공합니다.</p>
+                  <p>Annotation에는 이미지 내 각 개체의 <code>name</code>, <code>pet_id</code>, <code>bbox</code>, <code>assignment_status</code>가 들어갑니다.</p>
+                  <p><code>모두 다운로드</code> 또는 <code>적어도 하나 ACCEPTED가 있는 이미지</code>만 골라 받을 수 있습니다.</p>
+                </span>
+              </span>
+            </span>
+            <button id="btnReloadGallery">현재 갤러리 새로고침</button>
+          </div>
+          <div id="opsMeta" class="meta"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Qdrant</h2>
+            <button id="btnQdrantStatus">새로고침</button>
+          </div>
+          <pre id="qdrantStatusBox" class="status-box"></pre>
+        </section>
+
+        <section class="panel log-panel">
+          <div class="panel-head">
+            <h2>Log</h2>
+          </div>
+          <pre id="logBox"></pre>
+        </section>
+      </aside>
+
+      <section class="stage">
+        <section class="panel accent-panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow small-eyebrow">Seed Registry</p>
+              <h2>Pet List</h2>
+            </div>
+            <div class="inline-actions wrap"><span class="action-help-group"><button id="btnDownloadExemplarsZip" type="button">Exemplar 다운로드</button><span class="help-anchor"><button type="button" class="help-trigger" data-help-target="helpDownloadExemplarsZip" aria-expanded="false" aria-controls="helpDownloadExemplarsZip">?</button><span id="helpDownloadExemplarsZip" class="help-popover" hidden><strong>설명</strong><p>Exemplar ZIP은 pet 이름별 폴더로 묶인 query/reference 이미지셋입니다.</p><p>각 exemplar 이미지는 단일 개체가 선명하게 포함된 구성을 권장합니다.</p></span></span></span><div id="petMeta" class="meta"></div></div>
+          </div>
+          <div id="petButtons" class="pet-buttons"></div>
+          <div id="activePetStrip" class="seed-strip"></div>
+        </section>
+
+        <section class="panel work-panel">
+          <div class="work-header">
+            <div class="view-tabs">
+              <button id="btnViewAll" data-view="ALL" class="tab active">전체</button>
+              <button id="btnViewUnclassified" data-view="UNCLASSIFIED" class="tab">미분류</button>
+              <button id="btnViewPet" data-view="PET" class="tab">PET 버킷</button>
+            </div>
+            <div class="search-controls">
+              <button id="btnAutoClassify" class="primary">자동 분류</button>
+              <label>Top K<input id="similarTopK" type="number" min="1" max="500" value="80" /></label>
+              <button id="btnSimilarSearch">유사 정렬</button>
+              <button id="btnClearRanking">정렬 초기화</button>
+            </div>
+          </div>
+
+          <div class="gallery-filter-bar">
+            <div class="gallery-filter-controls">
+              <label>상태
+                <select id="galleryStateFilter">
+                  <option value="ALL">전체</option>
+                  <option value="UNREVIEWED">미분류</option>
+                  <option value="ACCEPTED">ACCEPTED</option>
+                </select>
+              </label>
+              <label>개체 수
+                <select id="galleryMultiplicityFilter">
+                  <option value="ALL">전체</option>
+                  <option value="SINGLE">SINGLE</option>
+                  <option value="MULTI">MULTI</option>
+                </select>
+              </label>
+              <label>대상 Pet
+                <input id="galleryPetFilter" list="galleryPetFilterList" placeholder="pet 이름 또는 id 입력" />
+                <datalist id="galleryPetFilterList"></datalist>
+              </label>
+              <button id="btnResetGalleryFilters" type="button">필터 초기화</button>
+            </div>
+          </div>
+
+          <div class="selection-bar">
+            <div id="selectionMeta" class="selection-meta">선택된 이미지 0장</div>
+            <div class="inline-actions wrap">
+              <button id="btnSelectAll">전체 선택</button>
+              <button id="btnClearSelection">전체 해제</button>
+              <button id="btnAssignSelected" class="primary" disabled>현재 pet에 포함</button>
+              <button id="btnClearSelected">미지정으로 되돌리기</button>
+            </div>
+          </div>
+
+          <div id="galleryMeta" class="gallery-meta"></div>
+          <div id="galleryGrid" class="gallery-grid"></div>
+        </section>
+
+        <section class="panel bucket-summary-panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow small-eyebrow">Finalize Snapshot</p>
+              <h2>Bucket Summary</h2>
+            </div>
+            <div id="bucketSummaryMeta" class="meta"></div>
+          </div>
+          <div id="bucketSummaryPane" class="bucket-summary-empty">버킷 확정 후 통계가 표시됩니다.</div>
+        </section>
+      </section>
+    </main>
+
+    <div id="inspectorBackdrop" class="inspector-backdrop" hidden></div>
+    <section id="inspectorDrawer" class="inspector-drawer" aria-hidden="true">
+      <div class="panel inspector-panel inspector-drawer-panel">
+        <div class="panel-head inspector-drawer-head">
+          <div>
+            <p class="eyebrow small-eyebrow">Image Detail</p>
+            <h2>Inspector</h2>
+          </div>
+          <div class="inspector-drawer-actions">
+            <div id="detailMeta" class="meta"></div>
+            <button id="btnCloseInspector" class="context-menu-close inspector-close" type="button" aria-label="닫기"><span class="context-menu-close-icon">×</span></button>
+          </div>
+        </div>
+        <div id="detailPane" class="detail-empty">이미지를 클릭하면 instance 상세가 표시됩니다.</div>
+      </div>
+    </section>
+
+    <div id="seedContextMenu" class="context-menu" hidden>
+      <button id="seedContextClose" class="context-menu-close" type="button" aria-label="닫기" onclick="window.closeSeedContextMenu && window.closeSeedContextMenu()"><span class="context-menu-close-icon">×</span></button>
+      <button id="seedContextMoveDaily" type="button">daily로 이동</button>
+      <div id="seedContextMoveOptions" class="context-menu-submenu" hidden>
+        <button id="seedContextMoveUnclassified" type="button">미분류로 이동</button>
+        <button id="seedContextMoveAccepted" type="button">현재 pet 버킷으로 이동</button>
+      </div>
+      <button id="seedContextDelete" type="button">exemplar에서 삭제</button>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

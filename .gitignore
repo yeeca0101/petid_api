@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache*/
+
+# Environments
+.env
+.envqd/
+.venv/
+venv/
+
+# Notebooks
+.ipynb_checkpoints/
+example_scripts/gradio_demo/
+notebooks
+
+# Local data / artifacts
+/data/
+/qdrant_storage/
+/weights/
+/models_cache/
+/snapshots/
+
+/*/*/*ref
+data/
+head_pose_analyze/
+
+# Runtime markers
+.qdrant-initialized
+
+# OS
+.DS_Store
+Thumbs.db
+
+*/*/weights/
+results
+*copy*
+*.zip
