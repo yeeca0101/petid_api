@@ -22,6 +22,6 @@ RUN pip install --upgrade pip \
 COPY .env.example ./.env.example
 COPY setup_scripts ./setup_scripts
 
-EXPOSE 8000
+EXPOSE 8009
 
-CMD ["bash", "-lc", "if [ ! -f \"${YOLO_WEIGHTS_PATH:-/app/weights/yolo/yolo26x.pt}\" ]; then echo \"YOLO weights not found at ${YOLO_WEIGHTS_PATH:-/app/weights/yolo/yolo26x.pt}. Trying download_weights.sh...\"; bash /app/setup_scripts/download_weights.sh; fi && exec uvicorn app.main:app --reload --host 0.0.0.0 --port 8000"]
+CMD ["bash", "-lc", "if [ ! -f \"${YOLO_WEIGHTS_PATH:-/app/weights/yolo/yolo26x.pt}\" ]; then echo \"YOLO weights not found at ${YOLO_WEIGHTS_PATH:-/app/weights/yolo/yolo26x.pt}. Trying download_weights.sh...\"; bash /app/setup_scripts/download_weights.sh; fi && exec sleep infinity"]

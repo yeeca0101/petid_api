@@ -12,7 +12,7 @@ services:
       - .env
     environment:
       HOST: 0.0.0.0
-      PORT: 8000
+      PORT: 8009
       TZ: ${TZ:-Asia/Seoul}
       LOG_TZ: ${LOG_TZ:-Asia/Seoul}
       BUSINESS_TZ: ${BUSINESS_TZ:-Asia/Seoul}
@@ -32,21 +32,9 @@ services:
         count: all
         capabilities: [gpu]
     ports:
-      - "${API_DEV_PORT:-8001}:8000"
+      - "${API_DEV_PORT:-8009}:8009"
     volumes:
-      - ./app:/app/app
-      - ./for_admin:/app/for_admin
-      - ./setup_scripts:/app/setup_scripts
-      - ./data:/app/data
-      - ./weights:/app/weights
-      - ./.env:/app/.env:ro
-      - ./requirements.txt:/app/requirements.txt:ro
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/v1/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 90s
+      - .:/app
 
   front-dev:
     image: nginx:1.27-alpine

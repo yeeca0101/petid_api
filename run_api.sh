@@ -5,12 +5,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${VENV_DIR:-${SCRIPT_DIR}/.venv}"
 ENV_FILE="${ENV_FILE:-${SCRIPT_DIR}/.env}"
 
-if [[ ! -f "${VENV_DIR}/bin/activate" ]]; then
+if [[ -f "${VENV_DIR}/bin/activate" ]]; then
+  source "${VENV_DIR}/bin/activate"
+else
   echo "venv activate script not found: ${VENV_DIR}/bin/activate"
-  echo "Run ./setup_env.sh first, or set VENV_DIR."
-  exit 1
+  echo "Continue with current Python environment."
+  if ! command -v uvicorn >/dev/null 2>&1; then
+    echo "uvicorn not found in current environment."
+    echo "Run ./setup_scripts/1_setup_venv.sh first, or set VENV_DIR."
+    exit 1
+  fi
 fi
-source "${VENV_DIR}/bin/activate"
 
 set -a
 if [[ -f "${ENV_FILE}" ]]; then

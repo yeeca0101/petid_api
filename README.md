@@ -51,13 +51,14 @@ docker compose -f compose.dev.yml up --build
 ```
 
 Dev endpoints:
-- API: `http://localhost:8001`
+- API workspace port: `http://localhost:8009`
 - Frontend: `http://localhost:3001`
 - Qdrant: `http://localhost:6333`
 
 Dev behavior:
-- `app/` is bind-mounted into the API container and runs with `uvicorn --reload`
-- `for_admin/` is bind-mounted into both the API container and the frontend container
+- The API dev container is a workspace container; it does not auto-start FastAPI
+- Run the API manually inside the container with `./run_api.sh`
+- The whole project is bind-mounted into the API dev container
 - Frontend requests to `/v1` are proxied to the API container, so same-origin admin testing works without extra CORS setup
 - Dev ports can be overridden with `API_DEV_PORT` and `FRONT_DEV_PORT`
 
