@@ -13,15 +13,32 @@ PoC server for **pet instance detection + embedding + vector search** to support
 
 ---
 
-## Quickstart (Docker Compose, GPU + Qdrant)
-### 0) Put YOLO weights
-Copy/mount your YOLO26x weights to:
-`./weights/yolo/yolo26x.pt` (or set `YOLO_WEIGHTS_PATH`)
+## Quickstart (Docker Compose)
+### 0) Prepare env file
+```bash
+cp .env.example .env
+```
 
-### 1) Run
+### 1) Put YOLO weights
+Copy/mount your YOLO weights to:
+`./weights/yolo/yolo26x.pt`
+
+If you use a different filename or segmentation weights, update `.env`:
+```bash
+YOLO_WEIGHTS_PATH=/app/weights/yolo/yolo26x-seg.pt
+YOLO_TASK=segment
+```
+
+### 2) Run
 ```bash
 docker compose up --build
 ```
+
+Default compose settings:
+- API: `http://<server-ip>:8000`
+- Qdrant: `http://<server-ip>:6333`
+- `QDRANT_URL` is overridden to `http://qdrant:6333` inside the API container
+- `DEVICE` defaults to `cpu`; set `DEVICE=cuda:0` when running on a GPU host
 
 Open:
 - Swagger UI: `http://<server-ip>:8000/docs`
@@ -37,14 +54,14 @@ This repo also includes shell scripts used on the server setup.
 ./run_qdrant.sh
 ```
 
-2) Start API (loads `.env` and runs on port 8001)
+2) Start API (loads `.env` and runs on port 8009 by default)
 ```bash
 ./run_api.sh
 ```
 
 Open:
-- Swagger UI: `http://<server-ip>:8001/docs`
-- Health: `http://<server-ip>:8001/v1/health`
+- Swagger UI: `http://<server-ip>:8009/docs`
+- Health: `http://<server-ip>:8009/v1/health`
 
 ---
 
