@@ -27,7 +27,10 @@ services:
       GOOGLE_DRIVE_URL: ${GOOGLE_DRIVE_URL:-}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
-    gpus: all
+    gpus:
+      - driver: nvidia
+        count: all
+        capabilities: [gpu]
     ports:
       - "8000:8000"
     volumes:
