@@ -44,6 +44,23 @@ Open:
 - Swagger UI: `http://<server-ip>:8000/docs`
 - Health: `http://<server-ip>:8000/v1/health`
 
+### Development containers
+For local API/frontend editing, use the dev compose file:
+```bash
+docker compose -f compose.dev.yml up --build
+```
+
+Dev endpoints:
+- API: `http://localhost:8001`
+- Frontend: `http://localhost:3001`
+- Qdrant: `http://localhost:6333`
+
+Dev behavior:
+- `app/` is bind-mounted into the API container and runs with `uvicorn --reload`
+- `for_admin/` is bind-mounted into both the API container and the frontend container
+- Frontend requests to `/v1` are proxied to the API container, so same-origin admin testing works without extra CORS setup
+- Dev ports can be overridden with `API_DEV_PORT` and `FRONT_DEV_PORT`
+
 ---
 
 ## Run with provided scripts (no docker-compose)
