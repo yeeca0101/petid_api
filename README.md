@@ -52,15 +52,15 @@ docker compose -f compose.dev.yml up --build
 
 Dev endpoints:
 - API workspace port: `http://localhost:8009`
-- Frontend: `http://localhost:3001`
+- Admin dashboard: `http://localhost:8009/admin`
 - Qdrant: `http://localhost:6333`
 
 Dev behavior:
 - The API dev container is a workspace container; it does not auto-start FastAPI
 - Run the API manually inside the container with `./run_api.sh`
 - The whole project is bind-mounted into the API dev container
-- Frontend requests to `/v1` are proxied to the API container, so same-origin admin testing works without extra CORS setup
-- Dev ports can be overridden with `API_DEV_PORT` and `FRONT_DEV_PORT`
+- Admin static files are served directly by FastAPI at `/admin`
+- Dev port can be overridden with `API_DEV_PORT`
 
 ---
 

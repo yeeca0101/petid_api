@@ -19,6 +19,7 @@
 ## 접속
 서버 실행 후 브라우저에서:
 - `http://<host>:<port>/admin`
+- dev compose 기본값: `http://localhost:8009/admin`
 
 `app/main.py`에서 `for_admin` 디렉터리를 `/admin`으로 static mount 합니다.
 
