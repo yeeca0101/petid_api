@@ -183,6 +183,116 @@ class Settings(BaseSettings):
         description="Qdrant client timeout seconds.",
     )
 
+    # PostgreSQL / queue
+    postgres_host: str = Field(
+        default="localhost",
+        description="PostgreSQL host name.",
+    )
+    postgres_port: int = Field(
+        default=5432,
+        ge=1,
+        le=65535,
+        description="PostgreSQL port.",
+    )
+    postgres_db: str = Field(
+        default="petid",
+        description="PostgreSQL database name.",
+    )
+    postgres_user: str = Field(
+        default="petid",
+        description="PostgreSQL user name.",
+    )
+    postgres_password: str = Field(
+        default="petid_dev_password",
+        description="PostgreSQL password.",
+    )
+    database_url: Optional[str] = Field(
+        default=None,
+        description="Full SQLAlchemy database URL. Overrides host/user/password fields when set.",
+    )
+    db_pool_size: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description="Default DB connection pool size.",
+    )
+    db_max_overflow: int = Field(
+        default=20,
+        ge=0,
+        le=200,
+        description="DB connection pool overflow size.",
+    )
+    db_pool_timeout_s: float = Field(
+        default=30.0,
+        ge=0.1,
+        le=300.0,
+        description="Seconds to wait for a DB connection from the pool.",
+    )
+    read_source_default: Literal["filesystem", "postgres"] = Field(
+        default="filesystem",
+        description="Default metadata read source during migration.",
+    )
+    enable_dual_write: bool = Field(
+        default=False,
+        description="Enable dual-write from legacy stores into PostgreSQL during migration.",
+    )
+    enable_postgres_queue: bool = Field(
+        default=False,
+        description="Enable PostgreSQL-backed job queue paths.",
+    )
+    queue_local_capacity: int = Field(
+        default=8,
+        ge=1,
+        le=10000,
+        description="Max in-process jobs buffered per scheduler lane.",
+    )
+    queue_poll_interval_ms: int = Field(
+        default=1000,
+        ge=50,
+        le=60000,
+        description="Worker poll interval for queued jobs in milliseconds.",
+    )
+    queue_lease_timeout_s: int = Field(
+        default=120,
+        ge=5,
+        le=86400,
+        description="Seconds before a leased/running job is considered stale.",
+    )
+    queue_max_retries_default: int = Field(
+        default=3,
+        ge=0,
+        le=100,
+        description="Default max retries for new queue jobs.",
+    )
+    scheduler_lane_count: int = Field(
+        default=1,
+        ge=1,
+        le=32,
+        description="Number of logical in-process scheduler lanes.",
+    )
+    scheduler_max_inflight_jobs: int = Field(
+        default=1,
+        ge=1,
+        le=32,
+        description="Max concurrently executing jobs per lane.",
+    )
+    scheduler_enable_micro_batching: bool = Field(
+        default=False,
+        description="Enable cross-job micro-batching in the scheduler.",
+    )
+    scheduler_max_batch_items: int = Field(
+        default=16,
+        ge=1,
+        le=512,
+        description="Max items in one scheduler micro-batch.",
+    )
+    scheduler_max_batch_wait_ms: int = Field(
+        default=25,
+        ge=0,
+        le=5000,
+        description="Max wait time to accumulate a micro-batch in milliseconds.",
+    )
+
     # Compute
     device: str = Field(
         default="cuda:0",

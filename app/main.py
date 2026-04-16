@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api.v1.router import router as v1_router
 from app.core.config import settings
 from app.core.logging import setup_logging
+from app.db.lifecycle import dispose_db_state, init_db_state
 from app.ml.embedder import Embedder
 from app.vector_db.qdrant_store import QdrantStore
 
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging(settings.log_level)
+    init_db_state(app)
     verification_embedder = Embedder(
         settings,
         profile_name="verification",
@@ -87,7 +89,8 @@ async def lifespan(app: FastAPI):
         )
         app.state.detector = det
     yield
-    # No explicit teardown for PoC
+    dispose_db_state(app)
+    # No explicit teardown for PoC ML/vector resources
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
