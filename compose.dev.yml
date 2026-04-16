@@ -6,6 +6,8 @@ services:
     container_name: petid_api_dev
     restart: unless-stopped
     depends_on:
+      postgres:
+        condition: service_healthy
       qdrant:
         condition: service_started
     env_file:
@@ -17,6 +19,12 @@ services:
       LOG_TZ: ${LOG_TZ:-Asia/Seoul}
       BUSINESS_TZ: ${BUSINESS_TZ:-Asia/Seoul}
       DEVICE: ${DEVICE:-cuda:0}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-petid}
+      POSTGRES_USER: ${POSTGRES_USER:-petid}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-petid_dev_password}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://petid:petid_dev_password@postgres:5432/petid}
       QDRANT_URL: http://qdrant:6333
       HF_CACHE_DIR: /app/weights
       STORAGE_DIR: /app/data
@@ -32,12 +40,31 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["3"]
+              device_ids: ["0"]
               capabilities: [gpu]
     ports:
       - "${API_DEV_PORT:-8009}:8009"
     volumes:
       - .:/app
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: petid_postgres_dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-petid}
+      POSTGRES_USER: ${POSTGRES_USER:-petid}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-petid_dev_password}
+      TZ: ${TZ:-Asia/Seoul}
+    ports:
+      - "${POSTGRES_DEV_PORT:-5432}:5432"
+    volumes:
+      - postgres_data_dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-petid} -d ${POSTGRES_DB:-petid}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   front-dev:
     image: nginx:1.27-alpine
@@ -63,4 +90,5 @@ services:
       - qdrant_storage_dev:/qdrant/storage
 
 volumes:
+  postgres_data_dev:
   qdrant_storage_dev:
