@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import logging
-import sys
 
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.db.session import DatabaseManager
+from app.worker.pipeline import build_worker_resources, execute_ingest_pipeline
 from app.worker.queue import QueueWorker, QueueWorkerConfig, build_default_worker_id
 from app.worker.scheduler import build_v1_scheduler
 
@@ -35,17 +35,21 @@ def main() -> int:
         False,
     )
 
-    handlers = {}
-    if not handlers:
-        logger.error(
-            "Queue worker has no registered job handlers yet. "
-            "Scheduler and durable lease loop are installed; pipeline execution handlers arrive in a later slice."
+    db = DatabaseManager(settings)
+    resources = build_worker_resources(settings)
+
+    handlers = {
+        "INGEST_PIPELINE": lambda *, job_id, payload: execute_ingest_pipeline(
+            db=db,
+            scheduler=scheduler,
+            resources=resources,
+            job_id=job_id,
+            payload=payload,
         )
-        scheduler.stop()
-        return 1
+    }
 
     worker = QueueWorker(
-        db=DatabaseManager(settings),
+        db=db,
         config=QueueWorkerConfig(
             worker_id=build_default_worker_id(),
             poll_interval_s=settings.queue_poll_interval_ms / 1000.0,

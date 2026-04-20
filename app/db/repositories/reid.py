@@ -8,7 +8,7 @@ from typing import Any, Optional
 from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
-from app.db.models.reid import ImageRecord, IngestRequestRecord, JobEventRecord, JobRecord
+from app.db.models.reid import ImageRecord, IngestRequestRecord, InstanceRecord, JobEventRecord, JobRecord
 
 
 def _utcnow() -> datetime:
@@ -99,6 +99,38 @@ class ReIdRepository:
         record.updated_at = _utcnow()
         self.session.flush()
         return record
+
+    def replace_instances_for_image(
+        self,
+        image_id: str,
+        *,
+        instances: list[dict[str, Any]],
+    ) -> list[InstanceRecord]:
+        self._require_image(image_id)
+        self.session.query(InstanceRecord).filter(InstanceRecord.image_id == image_id).delete(synchronize_session=False)
+        records: list[InstanceRecord] = []
+        for item in instances:
+            record = InstanceRecord(
+                instance_id=item["instance_id"],
+                image_id=image_id,
+                species=item["species"],
+                class_id=item["class_id"],
+                det_conf=item["det_conf"],
+                bbox_x1=item["bbox_x1"],
+                bbox_y1=item["bbox_y1"],
+                bbox_x2=item["bbox_x2"],
+                bbox_y2=item["bbox_y2"],
+                qdrant_point_id=item.get("qdrant_point_id"),
+                vector_status=item.get("vector_status", "READY"),
+                embedding_type=item.get("embedding_type", "BODY"),
+                model_version=item["model_version"],
+                created_at=item.get("created_at", _utcnow()),
+                updated_at=item.get("updated_at", _utcnow()),
+            )
+            self.session.add(record)
+            records.append(record)
+        self.session.flush()
+        return records
 
     def create_ingest_request(
         self,

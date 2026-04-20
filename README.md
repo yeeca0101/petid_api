@@ -84,9 +84,8 @@ This repo also includes shell scripts used on the server setup.
 
 Notes:
 - The PostgreSQL-backed queue path requires `ENABLE_POSTGRES_QUEUE=true`
-- The durable worker/lease loop may be present before full ingest pipeline handlers are wired in
 - V1 scheduler policy is single-lane, bounded local queue, strict sequential execution, and no micro-batching
-- If no job handlers are registered yet, the worker exits intentionally instead of consuming jobs incorrectly
+- The queue worker now handles `INGEST_PIPELINE` jobs and performs detect/embed/upsert in the worker process
 
 Open:
 - Swagger UI: `http://<server-ip>:8009/docs`
