@@ -17,8 +17,9 @@ from qdrant_client.http import models as qm
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
-from app.api.v1.endpoints.ingest import ingest as ingest_image
+from app.api.v1.endpoints.ingest import _parse_captured_at, _persist_uploaded_image, ingest as ingest_image
 from app.core.config import settings
+from app.db.repositories import ReIdRepository
 from app.schemas.exemplars import (
     ExemplarCreateRequest,
     ExemplarFolderUploadItemResult,
@@ -28,12 +29,14 @@ from app.schemas.exemplars import (
     ExemplarMoveToDailyRequest,
     ExemplarMoveToDailyResponse,
     ExemplarMutationResponse,
+    ExemplarQuickRegisterAcceptedResponse,
     ExemplarQuickRegisterResponse,
     ExemplarUpdateRequest,
 )
 from app.utils.pet_registry import allocate_pet_id, ensure_pet_mapping, find_pet_ids_by_name, get_pet_name, read_pet_name_map
 from app.utils.timezone import business_tz
 from app.vector_db.qdrant_store import PointRecord, QdrantStore
+from app.utils.image_io import load_pil_image
 
 router = APIRouter()
 
@@ -59,6 +62,13 @@ def _get_store(request: Request) -> QdrantStore:
     if store is None:
         raise HTTPException(status_code=503, detail="Vector DB not ready")
     return store
+
+
+def _get_db(request: Request):
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database manager not ready")
+    return db
 
 
 def _read_meta_safe(image_id: str) -> Optional[dict]:
@@ -643,6 +653,105 @@ def _resolve_quick_upload_target(pet_id: Optional[str], pet_name: Optional[str])
     return "create", None, pet_name_clean
 
 
+async def _queue_exemplar_upload(
+    *,
+    request: Request,
+    file: UploadFile,
+    pet_id: str,
+    pet_name: str,
+    updated_by: Optional[str],
+    trainer_id: Optional[str],
+    captured_at: Optional[str],
+    sync_label: bool,
+    apply_to_all_instances: bool,
+) -> tuple[str, str, str, str, str]:
+    db = _get_db(request)
+    img = await load_pil_image(file, settings.max_image_bytes)
+    w, h = img.size
+    cap_dt = _parse_captured_at(captured_at)
+    uploaded_at = _utcnow()
+    image_id = f"img_{uuid.uuid4().hex}"
+    raw_path, thumb_path = await _persist_uploaded_image(
+        file=file,
+        img=img,
+        image_id=image_id,
+        image_role="SEED",
+        pet_name=pet_name,
+        captured_dt=cap_dt,
+        uploaded_at=uploaded_at,
+    )
+    ensure_pet_mapping(pet_id, pet_name)
+    request_scope = "exemplar-upload"
+    idempotency_key = f"exemplar:{pet_id}:{image_id}"
+    request_hash = f"{file.filename or 'upload'}:{w}:{h}:{int(uploaded_at.timestamp())}"
+    business_date = (cap_dt or uploaded_at).astimezone(business_tz()).date()
+
+    with db.session_scope() as session:
+        repo = ReIdRepository(session)
+        image = repo.create_image(
+            image_id=image_id,
+            image_role="SEED",
+            daycare_id=None,
+            trainer_id=(trainer_id or "").strip() or None,
+            input_pet_name=pet_name,
+            captured_at=cap_dt,
+            uploaded_at=uploaded_at,
+            business_date=business_date,
+            original_filename=file.filename or None,
+            mime_type=file.content_type or None,
+            file_size_bytes=None,
+            width=w,
+            height=h,
+            raw_path=str(raw_path),
+            thumb_path=str(thumb_path),
+            storage_state="READY",
+            ingest_status="PENDING",
+            pipeline_stage="STORED",
+            pipeline_version="yolo26x+miewidv3+poc",
+        )
+        ingest_request = repo.create_ingest_request(
+            idempotency_key=idempotency_key,
+            request_scope=request_scope,
+            status="RECEIVED",
+            image_id=image.image_id,
+            request_hash=request_hash,
+        )
+        job = repo.enqueue_job(
+            job_type="INGEST_PIPELINE",
+            dedupe_key=image.image_id,
+            payload={
+                "request_id": str(ingest_request.request_id),
+                "image_id": image.image_id,
+                "image_role": image.image_role,
+                "trainer_id": image.trainer_id,
+                "daycare_id": image.daycare_id,
+                "input_pet_name": image.input_pet_name,
+                "captured_at": (image.captured_at.isoformat() if image.captured_at is not None else None),
+                "uploaded_at": image.uploaded_at.isoformat(),
+                "original_filename": image.original_filename,
+                "raw_path": image.raw_path,
+                "thumb_path": image.thumb_path,
+                "include_embedding": False,
+                "seed_registration": {
+                    "pet_id": pet_id,
+                    "pet_name": pet_name,
+                    "updated_by": updated_by,
+                    "sync_label": sync_label,
+                    "apply_to_all_instances": apply_to_all_instances,
+                },
+            },
+            status="QUEUED",
+            priority=50,
+            max_retries=settings.queue_max_retries_default,
+        )
+        repo.append_job_event(
+            job_id=job.job_id,
+            event_type="EXEMPLAR_UPLOAD_ENQUEUED",
+            payload={"request_id": str(ingest_request.request_id), "image_id": image.image_id, "pet_id": pet_id},
+        )
+        return str(ingest_request.request_id), str(job.job_id), image.image_id, image.raw_path, image.thumb_path
+
+
 @router.get("/exemplars", response_model=ExemplarListResponse)
 async def list_exemplars(
     request: Request,
@@ -798,7 +907,7 @@ async def download_exemplars_zip(
     )
 
 
-@router.post("/exemplars/upload", response_model=ExemplarQuickRegisterResponse)
+@router.post("/exemplars/upload", response_model=ExemplarQuickRegisterResponse | ExemplarQuickRegisterAcceptedResponse)
 async def upload_exemplar_quick(
     request: Request,
     file: UploadFile = File(...),
@@ -812,9 +921,34 @@ async def upload_exemplar_quick(
 ):
     """Quick admin flow: upload one seed image either for a new pet or append it to an existing pet."""
     now = _utcnow()
-    store = _get_store(request)
+    store = _get_store(request) if not settings.enable_postgres_queue else None
     mode, resolved_pet_id, resolved_pet_name, image_id, items = None, None, None, None, None
     mode, resolved_pet_id, resolved_pet_name = _resolve_quick_upload_target(pet_id, pet_name)
+    if settings.enable_postgres_queue:
+        queue_pet_id = resolved_pet_id or _pet_id_from_name(resolved_pet_name)
+        request_id, job_id, image_id, _raw_path, _thumb_path = await _queue_exemplar_upload(
+            request=request,
+            file=file,
+            pet_id=queue_pet_id,
+            pet_name=resolved_pet_name,
+            updated_by=updated_by,
+            trainer_id=trainer_id,
+            captured_at=captured_at,
+            sync_label=sync_label,
+            apply_to_all_instances=apply_to_all_instances,
+        )
+        return ExemplarQuickRegisterAcceptedResponse(
+            mode=mode,
+            pet_id=queue_pet_id,
+            pet_name=resolved_pet_name,
+            image_id=image_id,
+            request_id=request_id,
+            job_id=job_id,
+            status_url=f"{settings.api_prefix}/ingest/requests/{request_id}",
+            updated_at=now,
+            queued=True,
+            message=("기존 pet exemplar 등록 요청을 큐에 추가했습니다." if mode == "append" else "새 pet exemplar 등록 요청을 큐에 추가했습니다."),
+        )
     resolved_pet_id, resolved_pet_name, image_id, items = await _register_exemplar_from_uploaded_file(
         request=request,
         store=store,
@@ -862,11 +996,12 @@ async def upload_exemplar_folder(
     if len(files) != len(relative_paths):
         raise HTTPException(status_code=400, detail="files and relative_paths count mismatch")
 
-    store = _get_store(request)
+    store = _get_store(request) if not settings.enable_postgres_queue else None
     now = _utcnow()
     results: List[ExemplarFolderUploadItemResult] = []
     succeeded = 0
     failed = 0
+    queued = 0
     resolved_pet_targets: Dict[str, tuple[str, str]] = {}
 
     for upload, rel_path in zip(files, relative_paths):
@@ -877,6 +1012,34 @@ async def upload_exemplar_folder(
                 target = _resolve_folder_upload_target(pet_name, existing_name_policy)
                 resolved_pet_targets[pet_name] = target
             pet_id, resolved_pet_name = target
+            if settings.enable_postgres_queue:
+                request_id, job_id, image_id, _raw_path, _thumb_path = await _queue_exemplar_upload(
+                    request=request,
+                    file=upload,
+                    pet_id=pet_id,
+                    pet_name=resolved_pet_name,
+                    updated_by=updated_by,
+                    trainer_id=trainer_id,
+                    captured_at=captured_at,
+                    sync_label=sync_label,
+                    apply_to_all_instances=apply_to_all_instances,
+                )
+                queued += 1
+                results.append(
+                    ExemplarFolderUploadItemResult(
+                        relative_path=rel_path,
+                        pet_name=resolved_pet_name,
+                        pet_id=pet_id,
+                        image_id=image_id,
+                        img_name=(upload.filename or None),
+                        registered_instances=0,
+                        status="queued",
+                        request_id=request_id,
+                        job_id=job_id,
+                        status_url=f"{settings.api_prefix}/ingest/requests/{request_id}",
+                    )
+                )
+                continue
             pet_id, _pet_name_clean, image_id, items = await _register_exemplar_from_uploaded_file(
                 request=request,
                 store=store,
@@ -919,6 +1082,7 @@ async def upload_exemplar_folder(
         total_files=len(files),
         succeeded=succeeded,
         failed=failed,
+        queued=queued,
         results=results,
         message=f"중복 이름 정책: {existing_name_policy}",
     )

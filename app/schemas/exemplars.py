@@ -69,6 +69,19 @@ class ExemplarQuickRegisterResponse(BaseModel):
     message: Optional[str] = None
 
 
+class ExemplarQuickRegisterAcceptedResponse(BaseModel):
+    mode: Literal["create", "append"]
+    pet_id: str
+    pet_name: str
+    image_id: str
+    request_id: str
+    job_id: str
+    status_url: str
+    updated_at: datetime
+    queued: bool = True
+    message: Optional[str] = None
+
+
 class ExemplarFolderUploadItemResult(BaseModel):
     relative_path: str
     pet_name: Optional[str] = None
@@ -77,6 +90,9 @@ class ExemplarFolderUploadItemResult(BaseModel):
     img_name: Optional[str] = None
     registered_instances: int = 0
     status: str
+    request_id: Optional[str] = None
+    job_id: Optional[str] = None
+    status_url: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -102,5 +118,6 @@ class ExemplarFolderUploadResponse(BaseModel):
     total_files: int
     succeeded: int
     failed: int
+    queued: int = 0
     results: List[ExemplarFolderUploadItemResult]
     message: Optional[str] = None

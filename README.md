@@ -86,6 +86,7 @@ Notes:
 - The PostgreSQL-backed queue path requires `ENABLE_POSTGRES_QUEUE=true`
 - V1 scheduler policy is single-lane, bounded local queue, strict sequential execution, and no micro-batching
 - The queue worker now handles `INGEST_PIPELINE` jobs and performs detect/embed/upsert in the worker process
+- Exemplar quick/folder uploads also use the queue path when PostgreSQL queue mode is enabled
 
 Open:
 - Swagger UI: `http://<server-ip>:8009/docs`

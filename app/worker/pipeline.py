@@ -289,6 +289,7 @@ def _run_gpu_ingest_steps(
     detections = _filter_small_detections(settings, detections, image_role=image_role)
     source_detections = [_detection_to_source_meta(settings, d) for d in detections]
     primary_source_detection_index: Optional[int] = None
+    seed_registration = payload.get("seed_registration") if isinstance(payload.get("seed_registration"), dict) else None
 
     if image_role == "SEED" and len(detections) > 1:
         primary_source_detection_index = min(
@@ -321,12 +322,22 @@ def _run_gpu_ingest_steps(
     points: list[qm.PointStruct] = []
     meta_instances: list[dict[str, Any]] = []
     model_version = resources.embedder.model_info.model_version
+    selected_seed_indexes: set[int] = set()
+    if seed_registration and inst_meta:
+        apply_to_all = bool(seed_registration.get("apply_to_all_instances", False))
+        if apply_to_all:
+            selected_seed_indexes = set(range(len(inst_meta)))
+        else:
+            selected_seed_indexes = {
+                max(range(len(inst_meta)), key=lambda idx: float(inst_meta[idx][0].confidence))
+            }
 
     for i, (d, bb) in enumerate(inst_meta):
         point_uuid = uuid.uuid5(uuid.NAMESPACE_URL, f"{image_id}:instance:{i}")
         instance_id = f"ins_{point_uuid}"
         emb_vec = embs[i].tolist() if len(embs) else []
         species = _parse_species(int(d.class_id))
+        is_selected_seed = i in selected_seed_indexes
 
         point_payload = {
             "daycare_id": payload.get("daycare_id"),
@@ -342,17 +353,53 @@ def _run_gpu_ingest_steps(
             "model_version": model_version,
             "instance_id": instance_id,
         }
+        meta_item = {
+            "instance_id": instance_id,
+            "class_id": int(d.class_id),
+            "species": species,
+            "confidence": float(d.confidence),
+            "bbox": {"x1": bb.x1, "y1": bb.y1, "x2": bb.x2, "y2": bb.y2},
+            "pet_id": None,
+        }
+        if seed_registration and is_selected_seed:
+            seed_pet_id = str(seed_registration.get("pet_id") or "").strip()
+            point_payload.update(
+                {
+                    "is_seed": True,
+                    "seed_pet_id": seed_pet_id,
+                    "seed_active": True,
+                    "seed_rank": None,
+                    "seed_note": "quick_upload",
+                    "seed_created_at_ts": int(_utcnow().timestamp()),
+                    "seed_created_by": seed_registration.get("updated_by"),
+                    "seed_updated_at_ts": int(_utcnow().timestamp()),
+                    "seed_updated_by": seed_registration.get("updated_by"),
+                    "pet_name": seed_registration.get("pet_name"),
+                }
+            )
+            if bool(seed_registration.get("sync_label", True)):
+                point_payload.update(
+                    {
+                        "pet_id": seed_pet_id,
+                        "assignment_status": "ACCEPTED",
+                        "label_source": "MANUAL",
+                        "label_confidence": 1.0,
+                        "labeled_at_ts": int(_utcnow().timestamp()),
+                        "labeled_by": seed_registration.get("updated_by"),
+                    }
+                )
+                meta_item.update(
+                    {
+                        "pet_id": seed_pet_id,
+                        "assignment_status": "ACCEPTED",
+                        "label_source": "MANUAL",
+                        "label_confidence": 1.0,
+                        "labeled_at_ts": int(_utcnow().timestamp()),
+                        "labeled_by": seed_registration.get("updated_by"),
+                    }
+                )
         points.append(qm.PointStruct(id=str(point_uuid), vector=emb_vec, payload=point_payload))
-        meta_instances.append(
-            {
-                "instance_id": instance_id,
-                "class_id": int(d.class_id),
-                "species": species,
-                "confidence": float(d.confidence),
-                "bbox": {"x1": bb.x1, "y1": bb.y1, "x2": bb.x2, "y2": bb.y2},
-                "pet_id": None,
-            }
-        )
+        meta_instances.append(meta_item)
 
     return {
         "points": points,
