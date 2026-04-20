@@ -82,11 +82,19 @@ This repo also includes shell scripts used on the server setup.
 ./run_queue_worker.sh
 ```
 
+4) Build reconciliation report
+```bash
+./run_reid_reconcile.sh
+```
+
+
+
 Notes:
 - The PostgreSQL-backed queue path requires `ENABLE_POSTGRES_QUEUE=true`
 - V1 scheduler policy is single-lane, bounded local queue, strict sequential execution, and no micro-batching
 - The queue worker now handles `INGEST_PIPELINE` jobs and performs detect/embed/upsert in the worker process
 - Exemplar quick/folder uploads also use the queue path when PostgreSQL queue mode is enabled
+- Slice 10 import/reconciliation tooling currently covers filesystem sidecars plus PostgreSQL state; direct Qdrant parity scanning is not included yet
 
 Open:
 - Swagger UI: `http://<server-ip>:8009/docs`
@@ -226,6 +234,22 @@ Use `--hard` to delete the collection itself:
 ```bash
 ./example_scripts/06_clear_qdrant.sh --hard
 ```
+
+### Reconciliation report
+```bash
+./run_reid_reconcile.sh
+```
+
+Write JSON and fail when cutover blockers remain:
+```bash
+./run_reid_reconcile.sh --format json --output ./data/shared/reid_reconcile.json --fail-on-cutover-blockers
+```
+
+Current import scope:
+- imports `images` and `instances` from legacy sidecar metadata
+- reports registry entry counts but does not import pets because no `pets` table exists yet
+- skips assignment history/current-state import because `instance_assignments` is not part of the current V1 schema
+- uses DB/state-based reconciliation for vector parity; it does not scan Qdrant contents directly
 
 ---
 

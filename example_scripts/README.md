@@ -59,6 +59,10 @@ API_BASE=http://<host>:8001 bash 00_health.sh
 - `10_reset_and_reseed_e2e.sh`  
   Qdrant + 로컬 저장소 초기화 후 `08 -> 09` 연속 실행
 
+- `14_reid_reconcile.sh`  
+  filesystem/PostgreSQL 기준 Re-ID reconciliation 리포트 생성
+
+
 - `gradio_demo/run_gradio_demo.sh`  
   웹 UI로 반자동 분류 흐름 검증
 
@@ -115,4 +119,7 @@ DAYCARE_ID=dc_001 DAY=2026-02-13 bash 08_e2e_registered_unlabeled.sh
 
 # 초기화 + 재시드 + 검증
 FORCE=1 DAYCARE_ID=dc_001 DAY=2026-02-13 bash 10_reset_and_reseed_e2e.sh
-```
+
+# cutover blocker가 있는지 reconciliation 검사
+FAIL_ON_CUTOVER_BLOCKERS=1 bash 14_reid_reconcile.sh
+
