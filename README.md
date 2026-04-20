@@ -95,6 +95,14 @@ Notes:
 - The queue worker now handles `INGEST_PIPELINE` jobs and performs detect/embed/upsert in the worker process
 - Exemplar quick/folder uploads also use the queue path when PostgreSQL queue mode is enabled
 - Slice 10 import/reconciliation tooling currently covers filesystem sidecars plus PostgreSQL state; direct Qdrant parity scanning is not included yet
+- Current runtime behavior is still effectively sequential for ingest execution:
+  - one worker process claims one job at a time
+  - one V1 scheduler lane runs one inflight job at a time
+  - `QUEUE_LOCAL_CAPACITY` is not a parallelism knob
+- Planned future knob for higher throughput is slot-based ingest parallelism:
+  - `INGEST_PIPELINE_SLOTS`
+  - this should be interpreted as pipeline replica count, not generic thread count
+  - these settings are not active in the current code yet
 
 Open:
 - Swagger UI: `http://<server-ip>:8009/docs`

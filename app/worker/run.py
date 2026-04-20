@@ -19,6 +19,18 @@ def main() -> int:
         logger.error("Queue worker cannot start because ENABLE_POSTGRES_QUEUE is false.")
         return 1
 
+    logger.info(
+        "Ingest slot config | ingest_pipeline_slots=%s | ingest_pipeline_local_queue_capacity=%s",
+        settings.ingest_pipeline_slots,
+        settings.ingest_pipeline_local_queue_capacity,
+    )
+    if settings.ingest_pipeline_slots > 1:
+        logger.warning(
+            "INGEST_PIPELINE_SLOTS=%s is configured, but the current worker runtime is still single-slot. "
+            "Additional slots are not active yet.",
+            settings.ingest_pipeline_slots,
+        )
+
     scheduler = build_v1_scheduler(
         device=settings.device,
         local_queue_capacity=settings.queue_local_capacity,
