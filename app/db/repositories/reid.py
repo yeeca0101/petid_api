@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
 from app.db.models.reid import ImageRecord, IngestRequestRecord, InstanceRecord, JobEventRecord, JobRecord
 
 
 def _utcnow() -> datetime:
-    return datetime.now(UTC)
+    return datetime.now(timezone.utc)
 
 
 @dataclass
@@ -228,6 +228,25 @@ class ReIdRepository:
             select(JobRecord)
             .where(JobRecord.payload["request_id"].astext == str(request_id))
             .order_by(JobRecord.created_at.desc())
+        )
+        return self.session.execute(stmt).scalar_one_or_none()
+
+    def list_jobs(self, *, limit: int = 50, status: Optional[str] = None) -> list[JobRecord]:
+        stmt = select(JobRecord).order_by(JobRecord.created_at.desc()).limit(limit)
+        if status is not None:
+            stmt = stmt.where(JobRecord.status == status)
+        return list(self.session.execute(stmt).scalars())
+
+    def count_jobs_by_status(self) -> dict[str, int]:
+        stmt = select(JobRecord.status, func.count()).group_by(JobRecord.status)
+        rows = self.session.execute(stmt).all()
+        return {str(status): int(count) for status, count in rows}
+
+    def get_ingest_request_by_image_id(self, image_id: str) -> IngestRequestRecord | None:
+        stmt = (
+            select(IngestRequestRecord)
+            .where(IngestRequestRecord.image_id == image_id)
+            .order_by(IngestRequestRecord.created_at.desc())
         )
         return self.session.execute(stmt).scalar_one_or_none()
 

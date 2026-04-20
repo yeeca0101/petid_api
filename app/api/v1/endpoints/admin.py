@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Tuple
 from app.utils.timezone import business_tz
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
+from app.db.repositories import ReIdRepository
 from app.schemas.admin import AdminImageLabelItem, AdminImageLabelRequest, AdminImageLabelResponse
 from app.vector_db.qdrant_store import PointRecord, QdrantStore, build_filter
 
@@ -23,6 +25,13 @@ def _get_store(request: Request) -> QdrantStore:
     if store is None:
         raise HTTPException(status_code=503, detail="Vector DB not ready")
     return store
+
+
+def _get_db(request: Request):
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database manager not ready")
+    return db
 
 
 def _day_range_ts(day: date) -> Tuple[int, int]:
@@ -270,3 +279,141 @@ async def delete_instance(request: Request, instance_id: str):
         "image_id": sidecar_info.get("image_id") or image_id,
         "remaining_instances": int(sidecar_info.get("remaining_instances") or 0),
     }
+
+
+@router.get("/admin/queue/summary")
+async def queue_summary(request: Request):
+    db = _get_db(request)
+    with db.session_scope() as session:
+        repo = ReIdRepository(session)
+        counts = repo.count_jobs_by_status()
+        jobs = repo.list_jobs(limit=500)
+
+    stale_before = datetime.now(timezone.utc) - timedelta(seconds=settings.queue_lease_timeout_s)
+    stale_jobs = [
+        job
+        for job in jobs
+        if job.status in {"LEASED", "RUNNING"} and job.heartbeat_at is not None and job.heartbeat_at < stale_before
+    ]
+    return {
+        "queue_enabled": bool(settings.enable_postgres_queue),
+        "counts": counts,
+        "poll_interval_ms": settings.queue_poll_interval_ms,
+        "lease_timeout_s": settings.queue_lease_timeout_s,
+        "scheduler_local_capacity": settings.queue_local_capacity,
+        "scheduler_max_inflight_jobs": settings.scheduler_max_inflight_jobs,
+        "scheduler_micro_batching": bool(settings.scheduler_enable_micro_batching),
+        "stale_job_count": len(stale_jobs),
+        "stale_job_ids": [str(job.job_id) for job in stale_jobs[:20]],
+    }
+
+
+@router.get("/admin/jobs")
+async def list_jobs(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=500),
+    status: str | None = Query(default=None),
+):
+    db = _get_db(request)
+    with db.session_scope() as session:
+        repo = ReIdRepository(session)
+        jobs = repo.list_jobs(limit=limit, status=status)
+        items = []
+        for job in jobs:
+            image_id = str(job.payload.get("image_id") or "") or None
+            image = repo.get_image(image_id) if image_id else None
+            items.append(
+                {
+                    "job_id": str(job.job_id),
+                    "job_type": job.job_type,
+                    "status": job.status,
+                    "priority": job.priority,
+                    "retry_count": job.retry_count,
+                    "max_retries": job.max_retries,
+                    "locked_by": job.locked_by,
+                    "created_at": job.created_at,
+                    "started_at": job.started_at,
+                    "finished_at": job.finished_at,
+                    "heartbeat_at": job.heartbeat_at,
+                    "image_id": image_id,
+                    "image_ingest_status": image.ingest_status if image is not None else None,
+                    "image_pipeline_stage": image.pipeline_stage if image is not None else None,
+                    "error_code": job.error_code,
+                    "error_message": job.error_message,
+                }
+            )
+    return {"items": items, "count": len(items)}
+
+
+@router.get("/admin/jobs/{job_id}")
+async def get_job_detail(request: Request, job_id: str):
+    db = _get_db(request)
+    try:
+        parsed_job_id = uuid.UUID(job_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid job_id") from e
+
+    with db.session_scope() as session:
+        repo = ReIdRepository(session)
+        job = repo.get_job(parsed_job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        image_id = str(job.payload.get("image_id") or "") or None
+        image = repo.get_image(image_id) if image_id else None
+        ingest_request = None
+        request_id_raw = job.payload.get("request_id")
+        if request_id_raw:
+            try:
+                ingest_request = repo.get_ingest_request(uuid.UUID(str(request_id_raw)))
+            except ValueError:
+                ingest_request = None
+
+        return {
+            "job": {
+                "job_id": str(job.job_id),
+                "job_type": job.job_type,
+                "status": job.status,
+                "priority": job.priority,
+                "retry_count": job.retry_count,
+                "max_retries": job.max_retries,
+                "available_at": job.available_at,
+                "locked_by": job.locked_by,
+                "locked_at": job.locked_at,
+                "heartbeat_at": job.heartbeat_at,
+                "created_at": job.created_at,
+                "started_at": job.started_at,
+                "finished_at": job.finished_at,
+                "error_code": job.error_code,
+                "error_message": job.error_message,
+                "payload": job.payload,
+                "result": job.result,
+            },
+            "image": (
+                {
+                    "image_id": image.image_id,
+                    "image_role": image.image_role,
+                    "ingest_status": image.ingest_status,
+                    "pipeline_stage": image.pipeline_stage,
+                    "storage_state": image.storage_state,
+                    "last_error_code": image.last_error_code,
+                    "last_error_message": image.last_error_message,
+                    "raw_path": image.raw_path,
+                    "thumb_path": image.thumb_path,
+                }
+                if image is not None
+                else None
+            ),
+            "ingest_request": (
+                {
+                    "request_id": str(ingest_request.request_id),
+                    "status": ingest_request.status,
+                    "request_scope": ingest_request.request_scope,
+                    "idempotency_key": ingest_request.idempotency_key,
+                    "created_at": ingest_request.created_at,
+                    "updated_at": ingest_request.updated_at,
+                }
+                if ingest_request is not None
+                else None
+            ),
+        }

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Request
 
 from app.core.config import settings
+from app.db.repositories import ReIdRepository
 
 router = APIRouter()
 
@@ -42,6 +44,7 @@ def health(request: Request):
         "status": "ok",
         "model": model,
         "models": models if models else None,
+        "postgres_queue_enabled": bool(settings.enable_postgres_queue),
     }
 
 
@@ -96,3 +99,35 @@ def qdrant_health(request: Request):
         }
     except Exception as e:
         return {"status": "error", "qdrant": {"collection": store.collection}, "error": str(e)}
+
+
+@router.get("/health/queue")
+def queue_health(request: Request):
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return {"status": "not_ready", "queue": None}
+
+    try:
+        with db.session_scope() as session:
+            repo = ReIdRepository(session)
+            counts = repo.count_jobs_by_status()
+            jobs = repo.list_jobs(limit=200)
+
+        stale_before = datetime.now(timezone.utc) - timedelta(seconds=settings.queue_lease_timeout_s)
+        stale_jobs = [
+            job
+            for job in jobs
+            if job.status in {"LEASED", "RUNNING"} and job.heartbeat_at is not None and job.heartbeat_at < stale_before
+        ]
+        return {
+            "status": "ok",
+            "queue": {
+                "enabled": bool(settings.enable_postgres_queue),
+                "counts": counts,
+                "stale_job_count": len(stale_jobs),
+                "scheduler_local_capacity": settings.queue_local_capacity,
+                "scheduler_max_inflight_jobs": settings.scheduler_max_inflight_jobs,
+            },
+        }
+    except Exception as e:
+        return {"status": "error", "queue": None, "error": str(e)}

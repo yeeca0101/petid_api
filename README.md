@@ -90,6 +90,9 @@ Notes:
 Open:
 - Swagger UI: `http://<server-ip>:8009/docs`
 - Health: `http://<server-ip>:8009/v1/health`
+- Queue health: `http://<server-ip>:8009/v1/health/queue`
+- Admin queue summary: `http://<server-ip>:8009/v1/admin/queue/summary`
+- Admin jobs list: `http://<server-ip>:8009/v1/admin/jobs`
 
 ---
 
