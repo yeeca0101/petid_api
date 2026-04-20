@@ -45,3 +45,35 @@ class InstanceOut(BaseModel):
 class IngestResponse(BaseModel):
     image: ImageMeta
     instances: List[InstanceOut]
+
+
+class IngestAcceptedImage(BaseModel):
+    image_id: str
+    image_role: Literal["DAILY", "SEED"] = "DAILY"
+    uploaded_at: datetime
+    width: int
+    height: int
+    storage_path: str
+    thumb_path: str
+    ingest_status: Literal["PENDING", "PROCESSING", "READY", "FAILED"] = "PENDING"
+    pipeline_stage: Optional[str] = "STORED"
+
+
+class IngestAcceptedResponse(BaseModel):
+    request_id: str
+    job_id: str
+    status_url: str
+    image: IngestAcceptedImage
+
+
+class IngestStatusResponse(BaseModel):
+    request_id: str
+    request_status: str
+    image_id: Optional[str] = None
+    job_id: Optional[str] = None
+    job_status: Optional[str] = None
+    image_role: Optional[str] = None
+    ingest_status: Optional[str] = None
+    pipeline_stage: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Iterator, Optional
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
@@ -64,6 +65,18 @@ class DatabaseManager:
 
     def session(self) -> Session:
         return self.get_session_factory()()
+
+    @contextmanager
+    def session_scope(self) -> Iterator[Session]:
+        session = self.session()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
     def dispose(self) -> None:
         if self._engine is not None:

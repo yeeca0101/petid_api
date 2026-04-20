@@ -8,16 +8,21 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
+
 from app.utils.timezone import business_tz
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Request, UploadFile
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
+from app.db.repositories import ReIdRepository
 from app.ml.cropper import NormalizedBBox, crop_from_bbox, pad_bbox
 from app.schemas.ingest import (
     BBox,
     EmbeddingMeta,
+    IngestAcceptedImage,
+    IngestAcceptedResponse,
+    IngestStatusResponse,
     ImageMeta,
     IngestResponse,
     InstanceOut,
@@ -93,6 +98,62 @@ def _business_date_folder(dt: datetime) -> str:
     return dt.astimezone(business_tz()).date().isoformat()
 
 
+def _parse_captured_at(captured_at: Optional[str]) -> Optional[datetime]:
+    if not captured_at:
+        return None
+    try:
+        parsed = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=business_tz())
+        return parsed
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid captured_at: {captured_at}") from e
+
+
+async def _persist_uploaded_image(
+    *,
+    file: UploadFile,
+    img,
+    image_id: str,
+    image_role: str,
+    pet_name: Optional[str],
+    captured_dt: Optional[datetime],
+    uploaded_at: datetime,
+) -> tuple[Path, Path]:
+    base_dir = Path(settings.reid_storage_dir)
+    role_dir = image_role.lower()
+    if image_role == "SEED":
+        pet_dir = _safe_folder_name(pet_name)
+        raw_dir = base_dir / "images" / role_dir / pet_dir
+        thumb_dir = base_dir / "thumbs" / role_dir / pet_dir
+    else:
+        daily_folder = _business_date_folder(captured_dt or uploaded_at)
+        raw_dir = base_dir / "images" / role_dir / daily_folder
+        thumb_dir = base_dir / "thumbs" / role_dir / daily_folder
+
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    thumb_dir.mkdir(parents=True, exist_ok=True)
+
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in (".jpg", ".jpeg", ".png", ".webp"):
+        ext = ".jpg"
+
+    raw_path = raw_dir / f"{image_id}{ext}"
+    await run_in_threadpool(img.save, raw_path)
+
+    thumb_path = thumb_dir / f"{image_id}.jpg"
+
+    def _make_thumb():
+        t = img.copy()
+        if t.mode not in ("RGB", "L"):
+            t = t.convert("RGB")
+        t.thumbnail((settings.thumbnail_max_side_px, settings.thumbnail_max_side_px))
+        t.save(thumb_path, format="JPEG", quality=85)
+
+    await run_in_threadpool(_make_thumb)
+    return raw_path, thumb_path
+
+
 def _get_embedder(request: Request):
     embedders = getattr(request.app.state, "embedders", None)
     if isinstance(embedders, dict):
@@ -119,7 +180,7 @@ def _get_store(request: Request) -> QdrantStore:
     return store
 
 
-@router.post("/ingest", response_model=IngestResponse)
+@router.post("/ingest", response_model=IngestResponse | IngestAcceptedResponse)
 async def ingest(
     request: Request,
     file: UploadFile = File(...),
@@ -129,64 +190,137 @@ async def ingest(
     image_role: Literal["DAILY", "SEED"] = Form(default="DAILY"),
     pet_name: Optional[str] = Form(default=None, description="Used for SEED storage subdirectory"),
     include_embedding: bool = Query(default=False, description="Include vectors in response (debug)."),
+    x_idempotency_key: Optional[str] = Header(default=None),
 ):
     """Upload an image, detect pets, embed each detected instance, and store in vector DB."""
+
+    img = await load_pil_image(file, settings.max_image_bytes)
+    w, h = img.size
+
+    cap_dt = _parse_captured_at(captured_at)
+    resolved_daycare_id = (daycare_id or "").strip()
+    uploaded_at = _utcnow()
+    image_id = f"img_{uuid.uuid4().hex}"
+    raw_path, thumb_path = await _persist_uploaded_image(
+        file=file,
+        img=img,
+        image_id=image_id,
+        image_role=image_role,
+        pet_name=pet_name,
+        captured_dt=cap_dt,
+        uploaded_at=uploaded_at,
+    )
+
+    if settings.enable_postgres_queue:
+        db = getattr(request.app.state, "db", None)
+        if db is None:
+            raise HTTPException(status_code=503, detail="Database manager not ready")
+
+        request_scope = "ingest"
+        idempotency_key = (x_idempotency_key or "").strip() or f"ingest:{image_id}"
+        request_hash = f"{file.filename or 'upload'}:{w}:{h}:{int(uploaded_at.timestamp())}"
+        business_date = (cap_dt or uploaded_at).astimezone(business_tz()).date()
+
+        with db.session_scope() as session:
+            repo = ReIdRepository(session)
+            existing = repo.get_ingest_request_by_scope_key(
+                request_scope=request_scope,
+                idempotency_key=idempotency_key,
+            )
+            if existing is not None:
+                existing_job = repo.get_job_by_request_id(existing.request_id)
+                existing_image = repo.get_image(existing.image_id) if existing.image_id else None
+                if existing_job is not None and existing_image is not None:
+                    return IngestAcceptedResponse(
+                        request_id=str(existing.request_id),
+                        job_id=str(existing_job.job_id),
+                        status_url=f"{settings.api_prefix}/ingest/requests/{existing.request_id}",
+                        image=IngestAcceptedImage(
+                            image_id=existing_image.image_id,
+                            image_role=existing_image.image_role,
+                            uploaded_at=existing_image.uploaded_at,
+                            width=existing_image.width,
+                            height=existing_image.height,
+                            storage_path=existing_image.raw_path,
+                            thumb_path=existing_image.thumb_path,
+                            ingest_status=existing_image.ingest_status,
+                            pipeline_stage=existing_image.pipeline_stage,
+                        ),
+                    )
+
+            image = repo.create_image(
+                image_id=image_id,
+                image_role=image_role,
+                daycare_id=resolved_daycare_id or None,
+                trainer_id=(trainer_id or "").strip() or None,
+                input_pet_name=(pet_name or "").strip() or None,
+                captured_at=cap_dt,
+                uploaded_at=uploaded_at,
+                business_date=business_date,
+                original_filename=file.filename or None,
+                mime_type=file.content_type or None,
+                file_size_bytes=None,
+                width=w,
+                height=h,
+                raw_path=str(raw_path),
+                thumb_path=str(thumb_path),
+                storage_state="READY",
+                ingest_status="PENDING",
+                pipeline_stage="STORED",
+                pipeline_version="yolo26x+miewidv3+poc",
+            )
+            ingest_request = repo.create_ingest_request(
+                idempotency_key=idempotency_key,
+                request_scope=request_scope,
+                status="RECEIVED",
+                image_id=image.image_id,
+                request_hash=request_hash,
+            )
+            job = repo.enqueue_job(
+                job_type="INGEST_PIPELINE",
+                dedupe_key=image.image_id,
+                payload={
+                    "request_id": str(ingest_request.request_id),
+                    "image_id": image.image_id,
+                    "image_role": image.image_role,
+                    "trainer_id": image.trainer_id,
+                    "daycare_id": image.daycare_id,
+                    "include_embedding": include_embedding,
+                },
+                status="QUEUED",
+                priority=100,
+                max_retries=settings.queue_max_retries_default,
+            )
+            repo.append_job_event(
+                job_id=job.job_id,
+                event_type="JOB_ENQUEUED",
+                payload={"request_id": str(ingest_request.request_id), "image_id": image.image_id},
+            )
+
+        return IngestAcceptedResponse(
+            request_id=str(ingest_request.request_id),
+            job_id=str(job.job_id),
+            status_url=f"{settings.api_prefix}/ingest/requests/{ingest_request.request_id}",
+            image=IngestAcceptedImage(
+                image_id=image.image_id,
+                image_role=image.image_role,
+                uploaded_at=image.uploaded_at,
+                width=image.width,
+                height=image.height,
+                storage_path=image.raw_path,
+                thumb_path=image.thumb_path,
+                ingest_status=image.ingest_status,
+                pipeline_stage=image.pipeline_stage,
+            ),
+        )
 
     embedder = _get_embedder(request)
     detector = _get_detector(request)
     store = _get_store(request)
 
-    img = await load_pil_image(file, settings.max_image_bytes)
-    w, h = img.size
-
-    # Parse captured_at if provided
-    cap_dt: Optional[datetime] = None
-    if captured_at:
-        try:
-            parsed = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
-            if parsed.tzinfo is None:
-                # If client omits timezone, treat it as business timezone (default KST).
-                parsed = parsed.replace(tzinfo=business_tz())
-            cap_dt = parsed
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid captured_at: {captured_at}") from e
-
-    resolved_daycare_id = (daycare_id or "").strip()
-    uploaded_at = _utcnow()
-    image_id = f"img_{uuid.uuid4().hex}"
-
-    # Persist raw image (PoC local storage)
     base_dir = Path(settings.reid_storage_dir)
-    role_dir = image_role.lower()
-    if image_role == "SEED":
-        pet_dir = _safe_folder_name(pet_name)
-        raw_dir = base_dir / "images" / role_dir / pet_dir
-        thumb_dir = base_dir / "thumbs" / role_dir / pet_dir
-    else:
-        daily_folder = _business_date_folder(cap_dt or uploaded_at)
-        raw_dir = base_dir / "images" / role_dir / daily_folder
-        thumb_dir = base_dir / "thumbs" / role_dir / daily_folder
     meta_dir = base_dir / "meta"
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    thumb_dir.mkdir(parents=True, exist_ok=True)
     meta_dir.mkdir(parents=True, exist_ok=True)
-    ext = os.path.splitext(file.filename or "")[1].lower()
-    if ext not in (".jpg", ".jpeg", ".png", ".webp"):
-        ext = ".jpg"
-    raw_path = raw_dir / f"{image_id}{ext}"
-    await run_in_threadpool(img.save, raw_path)
-
-    # Create thumbnail
-    thumb_path = thumb_dir / f"{image_id}.jpg"
-
-    def _make_thumb():
-        t = img.copy()
-        if t.mode not in ("RGB", "L"):
-            t = t.convert("RGB")
-        t.thumbnail((settings.thumbnail_max_side_px, settings.thumbnail_max_side_px))
-        t.save(thumb_path, format="JPEG", quality=85)
-
-    await run_in_threadpool(_make_thumb)
 
     # Detect instances
     detections = []
@@ -336,3 +470,36 @@ async def ingest(
         ),
         instances=instances_out,
     )
+
+
+@router.get("/ingest/requests/{request_id}", response_model=IngestStatusResponse)
+async def get_ingest_request_status(request: Request, request_id: str):
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database manager not ready")
+
+    try:
+        parsed_request_id = uuid.UUID(request_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid request_id") from e
+
+    with db.session_scope() as session:
+        repo = ReIdRepository(session)
+        ingest_request = repo.get_ingest_request(parsed_request_id)
+        if ingest_request is None:
+            raise HTTPException(status_code=404, detail="Ingest request not found")
+        image = repo.get_image(ingest_request.image_id) if ingest_request.image_id else None
+        job = repo.get_job_by_request_id(parsed_request_id)
+
+        return IngestStatusResponse(
+            request_id=str(ingest_request.request_id),
+            request_status=ingest_request.status,
+            image_id=image.image_id if image is not None else ingest_request.image_id,
+            job_id=(str(job.job_id) if job is not None else None),
+            job_status=(job.status if job is not None else None),
+            image_role=(image.image_role if image is not None else None),
+            ingest_status=(image.ingest_status if image is not None else None),
+            pipeline_stage=(image.pipeline_stage if image is not None else None),
+            created_at=ingest_request.created_at,
+            updated_at=ingest_request.updated_at,
+        )
