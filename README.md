@@ -77,6 +77,16 @@ This repo also includes shell scripts used on the server setup.
 ./run_api.sh
 ```
 
+3) Start queue worker
+```bash
+./run_queue_worker.sh
+```
+
+Notes:
+- The PostgreSQL-backed queue path requires `ENABLE_POSTGRES_QUEUE=true`
+- The durable worker/lease loop may be present before full ingest pipeline handlers are wired in
+- If no job handlers are registered yet, the worker exits intentionally instead of consuming jobs incorrectly
+
 Open:
 - Swagger UI: `http://<server-ip>:8009/docs`
 - Health: `http://<server-ip>:8009/v1/health`

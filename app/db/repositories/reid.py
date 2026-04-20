@@ -228,6 +228,73 @@ class ReIdRepository:
         self.session.flush()
         return record
 
+    def start_job_run(
+        self,
+        job_id: uuid.UUID,
+        *,
+        worker_id: Optional[str] = None,
+        started_at: Optional[datetime] = None,
+    ) -> JobRecord:
+        current_time = started_at or _utcnow()
+        record = self._require_job(job_id)
+        record.status = "RUNNING"
+        if worker_id is not None:
+            record.locked_by = worker_id
+        record.started_at = current_time
+        record.heartbeat_at = current_time
+        self.session.flush()
+        return record
+
+    def complete_job(
+        self,
+        job_id: uuid.UUID,
+        *,
+        result: Optional[dict[str, Any]] = None,
+        finished_at: Optional[datetime] = None,
+    ) -> JobRecord:
+        current_time = finished_at or _utcnow()
+        record = self._require_job(job_id)
+        record.status = "SUCCEEDED"
+        record.result = result
+        record.finished_at = current_time
+        record.heartbeat_at = current_time
+        self.session.flush()
+        return record
+
+    def fail_job(
+        self,
+        job_id: uuid.UUID,
+        *,
+        error_code: Optional[str],
+        error_message: Optional[str],
+        finished_at: Optional[datetime] = None,
+    ) -> JobRecord:
+        current_time = finished_at or _utcnow()
+        record = self._require_job(job_id)
+        record.status = "FAILED"
+        record.error_code = error_code
+        record.error_message = error_message
+        record.finished_at = current_time
+        record.heartbeat_at = current_time
+        self.session.flush()
+        return record
+
+    def cancel_job(
+        self,
+        job_id: uuid.UUID,
+        *,
+        finished_at: Optional[datetime] = None,
+        error_message: Optional[str] = None,
+    ) -> JobRecord:
+        current_time = finished_at or _utcnow()
+        record = self._require_job(job_id)
+        record.status = "CANCELLED"
+        record.error_message = error_message
+        record.finished_at = current_time
+        record.heartbeat_at = current_time
+        self.session.flush()
+        return record
+
     def touch_job_heartbeat(self, job_id: uuid.UUID, *, heartbeat_at: Optional[datetime] = None) -> JobRecord:
         record = self._require_job(job_id)
         record.heartbeat_at = heartbeat_at or _utcnow()
@@ -264,6 +331,41 @@ class ReIdRepository:
         record.heartbeat_at = current_time
         self.session.flush()
         return record
+
+    def requeue_stale_jobs(
+        self,
+        *,
+        stale_before: datetime,
+        limit: int = 100,
+    ) -> list[JobRecord]:
+        stmt: Select[tuple[JobRecord]] = (
+            select(JobRecord)
+            .where(
+                JobRecord.status.in_(("LEASED", "RUNNING")),
+                JobRecord.heartbeat_at.is_not(None),
+                JobRecord.heartbeat_at < stale_before,
+            )
+            .order_by(JobRecord.heartbeat_at.asc())
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        records = list(self.session.execute(stmt).scalars())
+        for record in records:
+            record.retry_count += 1
+            record.available_at = _utcnow()
+            record.locked_by = None
+            record.locked_at = None
+            record.heartbeat_at = None
+            record.started_at = None
+            record.finished_at = None
+            record.error_code = "LEASE_TIMEOUT"
+            record.error_message = "Job lease expired before completion"
+            if record.retry_count > record.max_retries:
+                record.status = "DEAD_LETTER"
+            else:
+                record.status = "QUEUED"
+        self.session.flush()
+        return records
 
     def _require_image(self, image_id: str) -> ImageRecord:
         record = self.get_image(image_id)
