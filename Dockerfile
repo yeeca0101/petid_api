@@ -28,9 +28,8 @@ COPY .env.example ./.env.example
 COPY run_api.sh ./run_api.sh
 COPY run_queue_worker.sh ./run_queue_worker.sh
 COPY run_reid_reconcile.sh ./run_reid_reconcile.sh
-COPY run_legacy_reid_import.sh ./run_legacy_reid_import.sh
 
-RUN chmod +x /app/run_api.sh /app/run_queue_worker.sh /app/run_reid_reconcile.sh /app/run_legacy_reid_import.sh
+RUN chmod +x /app/run_api.sh /app/run_queue_worker.sh /app/run_reid_reconcile.sh
 
 EXPOSE 8000
 
