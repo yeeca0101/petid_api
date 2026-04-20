@@ -360,19 +360,26 @@ class ReIdRepository:
         now: Optional[datetime] = None,
     ) -> JobRecord | None:
         current_time = now or _utcnow()
-        stmt: Select[tuple[JobRecord]] = (
-            select(JobRecord)
-            .where(
-                JobRecord.status == "QUEUED",
-                JobRecord.available_at <= current_time,
-            )
-            .order_by(JobRecord.priority.asc(), JobRecord.available_at.asc(), JobRecord.created_at.asc())
-            .with_for_update(skip_locked=True)
+
+        stmt = select(JobRecord).where(
+            JobRecord.status == "QUEUED",
+            JobRecord.available_at <= current_time,
         )
+
         if job_type is not None:
             stmt = stmt.where(JobRecord.job_type == job_type)
 
-        record = self.session.execute(stmt).scalar_one_or_none()
+        stmt = (
+            stmt.order_by(
+                JobRecord.priority.asc(),
+                JobRecord.available_at.asc(),
+                JobRecord.created_at.asc(),
+            )
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+
+        record = self.session.execute(stmt).scalars().first()
         if record is None:
             return None
 
