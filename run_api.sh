@@ -46,4 +46,8 @@ export TZ
 
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8009}"
+
+echo "Running Alembic migrations: upgrade head"
+python3 -m alembic upgrade head
+
 exec uvicorn app.main:app --host "${HOST}" --port "${PORT}"

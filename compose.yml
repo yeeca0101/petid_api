@@ -6,6 +6,8 @@ services:
     container_name: petid_api
     restart: unless-stopped
     depends_on:
+      postgres:
+        condition: service_healthy
       qdrant:
         condition: service_started
     env_file:
@@ -17,13 +19,19 @@ services:
       LOG_TZ: ${LOG_TZ:-Asia/Seoul}
       BUSINESS_TZ: ${BUSINESS_TZ:-Asia/Seoul}
       DEVICE: ${DEVICE:-cuda:0}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-petid}
+      POSTGRES_USER: ${POSTGRES_USER:-petid}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-petid_dev_password}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://petid:petid_dev_password@postgres:5432/petid}
       QDRANT_URL: http://qdrant:6333
       HF_CACHE_DIR: /app/weights
       STORAGE_DIR: /app/data
       REID_STORAGE_DIR: /app/data/reid
       VERIFICATION_STORAGE_DIR: /app/data/verification
       SHARED_STORAGE_DIR: /app/data/shared
-      YOLO_WEIGHTS_PATH: ${YOLO_WEIGHTS_PATH:-/app/weights/yolo/yolo26x.pt}
+      YOLO_WEIGHTS_PATH: /app/weights/yolo/yolo26x.pt
       GOOGLE_DRIVE_URL: ${GOOGLE_DRIVE_URL:-}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
@@ -43,6 +51,68 @@ services:
       retries: 5
       start_period: 90s
 
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: petid_worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Asia/Seoul}
+      LOG_TZ: ${LOG_TZ:-Asia/Seoul}
+      BUSINESS_TZ: ${BUSINESS_TZ:-Asia/Seoul}
+      DEVICE: ${DEVICE:-cuda:0}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-petid}
+      POSTGRES_USER: ${POSTGRES_USER:-petid}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-petid_dev_password}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://petid:petid_dev_password@postgres:5432/petid}
+      QDRANT_URL: http://qdrant:6333
+      HF_CACHE_DIR: /app/weights
+      STORAGE_DIR: /app/data
+      REID_STORAGE_DIR: /app/data/reid
+      VERIFICATION_STORAGE_DIR: /app/data/verification
+      SHARED_STORAGE_DIR: /app/data/shared
+      YOLO_WEIGHTS_PATH: /app/weights/yolo/yolo26x.pt
+      GOOGLE_DRIVE_URL: ${GOOGLE_DRIVE_URL:-}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+    gpus:
+      - driver: nvidia
+        count: all
+        capabilities: [gpu]
+    command: ["bash", "-lc", "if [ ! -f \"/app/weights/yolo/yolo26x.pt\" ]; then echo \"YOLO weights not found at /app/weights/yolo/yolo26x.pt. Trying download_weights.sh...\"; bash /app/setup_scripts/download_weights.sh; fi && exec /app/run_queue_worker.sh"]
+    volumes:
+      - ./data:/app/data
+      - ./weights:/app/weights
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: petid_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-petid}
+      POSTGRES_USER: ${POSTGRES_USER:-petid}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-petid_dev_password}
+      TZ: ${TZ:-Asia/Seoul}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-petid} -d ${POSTGRES_DB:-petid}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   qdrant:
     image: qdrant/qdrant:latest
     container_name: petid_qdrant
@@ -54,4 +124,5 @@ services:
       - qdrant_storage:/qdrant/storage
 
 volumes:
+  postgres_data:
   qdrant_storage:
