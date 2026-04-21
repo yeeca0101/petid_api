@@ -1,4 +1,4 @@
-from app.worker.queue import JobHandler, QueueWorker, QueueWorkerConfig, QueueWorkerResult
+from app.worker.queue import ClaimedJob, JobHandler, QueueWorker, QueueWorkerConfig, QueueWorkerResult
 from app.worker.scheduler import (
     LaneExecutionPolicy,
     SchedulerFullError,
@@ -15,6 +15,7 @@ from app.worker.slots import (
 
 __all__ = [
     "JobHandler",
+    "ClaimedJob",
     "QueueWorker",
     "QueueWorkerConfig",
     "QueueWorkerResult",

@@ -112,6 +112,7 @@ class SingleLaneScheduler:
 
 def build_v1_scheduler(
     *,
+    lane_id: str = "lane-0",
     device: str,
     local_queue_capacity: int,
     enable_micro_batching: bool,
@@ -120,7 +121,7 @@ def build_v1_scheduler(
 ) -> SingleLaneScheduler:
     return SingleLaneScheduler(
         LaneExecutionPolicy(
-            lane_id="lane-0",
+            lane_id=lane_id,
             device=device,
             max_inflight_jobs=1,
             local_queue_capacity=local_queue_capacity,
