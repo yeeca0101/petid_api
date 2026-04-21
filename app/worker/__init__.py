@@ -6,6 +6,12 @@ from app.worker.scheduler import (
     SingleLaneScheduler,
     build_v1_scheduler,
 )
+from app.worker.slots import (
+    IngestPipelineSlot,
+    build_ingest_pipeline_slot,
+    build_ingest_pipeline_slots,
+    build_slot_worker_id,
+)
 
 __all__ = [
     "JobHandler",
@@ -17,4 +23,8 @@ __all__ = [
     "SchedulerTask",
     "SingleLaneScheduler",
     "build_v1_scheduler",
+    "IngestPipelineSlot",
+    "build_ingest_pipeline_slot",
+    "build_ingest_pipeline_slots",
+    "build_slot_worker_id",
 ]
