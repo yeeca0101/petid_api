@@ -8,6 +8,7 @@ import time
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.db.session import DatabaseManager
+from app.worker.active_jobs import ActiveJobRegistry
 from app.worker.pipeline import execute_ingest_pipeline
 from app.worker.queue import ClaimedJob, QueueWorker, QueueWorkerConfig, build_default_worker_id
 from app.worker.scheduler import SingleLaneScheduler, build_v1_scheduler
@@ -113,8 +114,7 @@ def _run_multi_slot(*, db: DatabaseManager, base_worker_id: str) -> int:
     dispatch_queue: queue.Queue[ClaimedJob] = queue.Queue(
         maxsize=max(1, settings.ingest_pipeline_local_queue_capacity)
     )
-    active_slots: set[str] = set()
-    active_slots_lock = threading.Lock()
+    active_jobs = ActiveJobRegistry()
 
     for slot in slots:
         logger.info(
@@ -148,21 +148,12 @@ def _run_multi_slot(*, db: DatabaseManager, base_worker_id: str) -> int:
     occupancy_limit = settings.ingest_pipeline_slots + settings.ingest_pipeline_local_queue_capacity
 
     def active_slot_count() -> int:
-        with active_slots_lock:
-            return len(active_slots)
-
-    def mark_slot_active(slot_id: str) -> None:
-        with active_slots_lock:
-            active_slots.add(slot_id)
-
-    def mark_slot_idle(slot_id: str) -> None:
-        with active_slots_lock:
-            active_slots.discard(slot_id)
+        return active_jobs.running_slot_count()
 
     def slot_loop(slot: IngestPipelineSlot, worker: QueueWorker) -> None:
         while True:
             claim = dispatch_queue.get()
-            mark_slot_active(slot.slot_id)
+            active_jobs.mark_running(job_id=claim.job_id, slot_id=slot.slot_id, worker_id=slot.worker_id)
             logger.info(
                 "Slot worker executing claimed job | slot_id=%s | worker_id=%s | job_id=%s | leased_by=%s",
                 slot.slot_id,
@@ -173,7 +164,7 @@ def _run_multi_slot(*, db: DatabaseManager, base_worker_id: str) -> int:
             try:
                 worker.process_claimed_job(claim, worker_id=slot.worker_id)
             finally:
-                mark_slot_idle(slot.slot_id)
+                active_jobs.mark_finished(job_id=claim.job_id)
                 dispatch_queue.task_done()
 
     slot_threads = [
@@ -209,6 +200,7 @@ def _run_multi_slot(*, db: DatabaseManager, base_worker_id: str) -> int:
                 time.sleep(coordinator.config.poll_interval_s)
                 continue
 
+            active_jobs.register_claim(claim)
             dispatch_queue.put_nowait(claim)
             logger.info(
                 "Coordinator dispatched claimed job | job_id=%s | leased_by=%s | active_slots=%s | dispatch_queue_size=%s",
