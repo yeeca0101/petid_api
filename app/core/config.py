@@ -246,8 +246,8 @@ class Settings(BaseSettings):
         le=32,
         validation_alias=AliasChoices("INGEST_PIPELINE_SLOTS", "INGEST_PIPELINE_THREADS"),
         description=(
-            "Planned concurrency knob for ingest pipeline replica slots. "
-            "Current code path still runs effectively single-slot."
+            "Concurrency knob for ingest pipeline replica slots. "
+            "INGEST_PIPELINE_SLOTS=1 preserves the single-slot path."
         ),
     )
     ingest_pipeline_local_queue_capacity: int = Field(
@@ -255,25 +255,25 @@ class Settings(BaseSettings):
         ge=0,
         le=10000,
         description=(
-            "Planned bounded local dispatch queue size for slot-based ingest execution. "
-            "Not active in the current single-slot worker path."
+            "Bounded local dispatch queue size for slot-based ingest execution. "
+            "Used by the multi-slot coordinator path."
         ),
     )
     ingest_pipeline_recommend_safety_vram_gb: float = Field(
         default=3.0,
         ge=0.0,
         le=256.0,
-        description="Planned safety margin for VRAM-based ingest slot recommendation tooling.",
+        description="Safety margin for VRAM-based ingest slot recommendation tooling.",
     )
     ingest_pipeline_recommend_safety_ram_gb: float = Field(
         default=4.0,
         ge=0.0,
         le=1024.0,
-        description="Planned safety margin for system RAM-based ingest slot recommendation tooling.",
+        description="Safety margin for system RAM-based ingest slot recommendation tooling.",
     )
     ingest_pipeline_probe_image: Optional[Path] = Field(
         default=None,
-        description="Optional probe image path for future ingest slot sizing/profiling tooling.",
+        description="Optional probe image path for ingest slot sizing/profiling tooling.",
     )
     queue_local_capacity: int = Field(
         default=8,

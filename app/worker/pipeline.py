@@ -91,10 +91,17 @@ class WorkerResources:
     store: QdrantStore
 
 
-def build_worker_resources(settings: Settings) -> WorkerResources:
+@dataclass(frozen=True)
+class ProbeResources:
+    settings: Settings
+    embedder: Embedder
+    detector: Optional[YoloDetector]
+
+
+def _build_embedder(settings: Settings, *, profile_name: str) -> Embedder:
     embedder = Embedder(
         settings,
-        profile_name="reid-worker",
+        profile_name=profile_name,
         model_name=settings.reid_model_name,
         miewid_model_source=settings.reid_miewid_model_source,
         miewid_finetune_ckpt_path=settings.reid_miewid_finetune_ckpt_path,
@@ -102,6 +109,26 @@ def build_worker_resources(settings: Settings) -> WorkerResources:
     )
     if embedder.dim is None:
         raise RuntimeError("Failed to resolve worker embedding dimension")
+    return embedder
+
+
+def _build_detector(settings: Settings) -> Optional[YoloDetector]:
+    if not settings.detector_enabled:
+        return None
+    keep_ids = [int(x.strip()) for x in settings.yolo_class_ids.split(",") if x.strip()]
+    return YoloDetector(
+        weights_path=settings.yolo_weights_path,
+        device=settings.device,
+        imgsz=settings.yolo_imgsz,
+        conf=settings.yolo_conf,
+        iou=settings.yolo_iou,
+        keep_class_ids=keep_ids,
+        task=settings.yolo_task,
+    )
+
+
+def build_worker_resources(settings: Settings) -> WorkerResources:
+    embedder = _build_embedder(settings, profile_name="reid-worker")
 
     store = QdrantStore(
         url=settings.qdrant_url,
@@ -111,20 +138,52 @@ def build_worker_resources(settings: Settings) -> WorkerResources:
     )
     store.ensure_collection(embedder.dim)
 
-    detector: Optional[YoloDetector] = None
-    if settings.detector_enabled:
-        keep_ids = [int(x.strip()) for x in settings.yolo_class_ids.split(",") if x.strip()]
-        detector = YoloDetector(
-            weights_path=settings.yolo_weights_path,
-            device=settings.device,
-            imgsz=settings.yolo_imgsz,
-            conf=settings.yolo_conf,
-            iou=settings.yolo_iou,
-            keep_class_ids=keep_ids,
-            task=settings.yolo_task,
-        )
-
+    detector = _build_detector(settings)
     return WorkerResources(settings=settings, embedder=embedder, detector=detector, store=store)
+
+
+def build_probe_resources(settings: Settings) -> ProbeResources:
+    return ProbeResources(
+        settings=settings,
+        embedder=_build_embedder(settings, profile_name="reid-probe"),
+        detector=_build_detector(settings),
+    )
+
+
+def run_ingest_probe(
+    *,
+    resources: ProbeResources,
+    pil_image: Image.Image,
+    image_role: str = "DAILY",
+) -> dict[str, Any]:
+    detections = resources.detector.detect(pil_image) if resources.detector is not None else [
+        type("_D", (), {"class_id": 16, "confidence": 1.0, "x1": 0.0, "y1": 0.0, "x2": 1.0, "y2": 1.0})
+    ]
+    detections = _filter_small_detections(resources.settings, detections, image_role=image_role)
+    if image_role == "SEED" and len(detections) > 1:
+        detections = [min(detections, key=_seed_detection_sort_key)]
+
+    crops = []
+    for detection in detections:
+        bbox = NormalizedBBox(
+            x1=float(detection.x1),
+            y1=float(detection.y1),
+            x2=float(detection.x2),
+            y2=float(detection.y2),
+        )
+        bbox = pad_bbox(bbox, resources.settings.crop_padding)
+        crops.append(crop_from_bbox(pil_image, bbox))
+
+    embeddings = resources.embedder.embed_pil_images(crops) if crops else []
+    return {
+        "image_size": pil_image.size,
+        "image_role": image_role,
+        "detected_instances": len(detections),
+        "cropped_instances": len(crops),
+        "embedded_instances": int(len(embeddings)),
+        "embedding_dim": int(embeddings.shape[1]) if len(embeddings) else resources.embedder.dim,
+        "model_version": resources.embedder.model_info.model_version,
+    }
 
 
 def execute_ingest_pipeline(

@@ -125,6 +125,27 @@ INGEST_PIPELINE_SLOTS=2
 INGEST_PIPELINE_LOCAL_QUEUE_CAPACITY=2
 ```
 
+### Slot Recommendation Tool
+Use the built-in recommendation CLI with a probe image to measure a conservative slot count for the current machine:
+
+```bash
+python3 -m app.tools.ingest_slot_recommend --probe-runtime
+```
+
+Runtime probe behavior:
+- Requires `INGEST_PIPELINE_PROBE_IMAGE` to point to a readable image file.
+- Builds the detector/embedder stack used by the ingest worker.
+- Runs detect -> crop -> embed without DB writes or Qdrant upserts.
+- Reports measured RAM deltas and, when CUDA stats are available, measured VRAM deltas.
+- Reuses `INGEST_PIPELINE_RECOMMEND_SAFETY_VRAM_GB` and `INGEST_PIPELINE_RECOMMEND_SAFETY_RAM_GB`.
+- Run this mode inside the dev container or another Python environment where the app dependencies and model weights are available.
+
+Example with the dev container:
+
+```bash
+docker exec -it petid_api_dev python3 -m app.tools.ingest_slot_recommend --probe-runtime
+```
+
 Open:
 - Swagger UI: `http://<server-ip>:8009/docs`
 - Health: `http://<server-ip>:8009/v1/health`
