@@ -88,10 +88,13 @@ services:
       GOOGLE_DRIVE_URL: ${GOOGLE_DRIVE_URL:-}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
-    gpus:
-      - driver: nvidia
-        count: all
-        capabilities: [gpu]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
     command: ["bash", "-lc", "if [ ! -f \"/app/weights/yolo/yolo26x.pt\" ]; then echo \"YOLO weights not found at /app/weights/yolo/yolo26x.pt. Trying download_weights.sh...\"; bash /app/setup_scripts/download_weights.sh; fi && exec /app/run_queue_worker.sh"]
     volumes:
       - ./data:/app/data
