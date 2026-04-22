@@ -1,6 +1,8 @@
 const el = (id) => document.getElementById(id);
 
 let inspectorResizeObserver = null;
+let galleryRefreshTimer = null;
+const GALLERY_AUTO_REFRESH_WINDOW_MS = 30000;
 
 const state = {
   pets: [],
@@ -28,6 +30,9 @@ const state = {
   singleSeedMode: "append",
   folderSeedPolicy: "append",
   seedContextTarget: null,
+  galleryAutoRefreshEnabled: false,
+  galleryAutoRefreshUntil: 0,
+  galleryLoadInFlight: false,
 };
 
 function nowIso() {
@@ -40,6 +45,46 @@ function log(msg, obj) {
   const line = `[${nowIso()}] ${msg}`;
   const text = obj ? `${line}\n${JSON.stringify(obj, null, 2)}\n` : `${line}\n`;
   box.textContent = text + box.textContent;
+}
+
+function clearGalleryRefreshTimer() {
+  if (galleryRefreshTimer) {
+    window.clearTimeout(galleryRefreshTimer);
+    galleryRefreshTimer = null;
+  }
+}
+
+function hasPendingGalleryItems(items) {
+  return Array.isArray(items) && items.some((item) => {
+    const status = String(item?.ingest_status || "").toUpperCase();
+    return status === "PENDING" || status === "PROCESSING";
+  });
+}
+
+function scheduleGalleryAutoRefresh() {
+  clearGalleryRefreshTimer();
+  if (!state.galleryAutoRefreshEnabled) return;
+  galleryRefreshTimer = window.setTimeout(async () => {
+    if (state.galleryLoadInFlight) {
+      scheduleGalleryAutoRefresh();
+      return;
+    }
+    try {
+      if (Date.now() < Number(state.galleryAutoRefreshUntil || 0)) {
+        await loadPets();
+      }
+      await loadGallery({ reason: "auto-refresh" });
+    } catch (err) {
+      log("Gallery auto-refresh failed", { error: err.message || String(err) });
+      scheduleGalleryAutoRefresh();
+    }
+  }, 2500);
+}
+
+function startGalleryAutoRefreshWindow(durationMs = GALLERY_AUTO_REFRESH_WINDOW_MS) {
+  state.galleryAutoRefreshUntil = Date.now() + Math.max(0, Number(durationMs || 0));
+  state.galleryAutoRefreshEnabled = true;
+  scheduleGalleryAutoRefresh();
 }
 
 function value(id) {
@@ -827,6 +872,7 @@ function renderGallery() {
     const score = state.searchScores[item.image_id];
     const petLabel = Array.isArray(item.pet_ids) && item.pet_ids.length > 0 ? item.pet_ids.join(", ") : "미지정";
     const cardState = inferCardState(item);
+    const ingestStatus = String(item.ingest_status || "").toUpperCase();
     const instanceCount = Number(item.instance_count || 0);
     const multiplicity = inferCardMultiplicity(item);
     card.innerHTML = `
@@ -838,12 +884,13 @@ function renderGallery() {
         <div class="inline-actions wrap card-badges">
           <span class="role-badge">${item.image_role}</span>
           <span class="state-badge ${cardState}">${cardState.toUpperCase()}</span>
+          ${ingestStatus && ingestStatus !== "READY" ? `<span class="state-badge unreviewed">${ingestStatus}</span>` : ""}
         </div>
         <div class="card-score-row"><span class="multiplicity-badge ${instanceCount > 1 ? "multi" : "single"}">${multiplicity}</span></div>
         ${score !== undefined ? `<div class="card-score-row"><span class="score-badge">sim ${score.toFixed(2)}</span></div>` : ""}
         <div class="pet-label">${petLabel}</div>
         <div class="pet-sub filename" title="${escapeHtml(displayImageName(item))}"><code>${escapeHtml(displayImageName(item))}</code></div>
-        <div class="instance-meta">instances=${item.instance_count}</div>
+        <div class="instance-meta">instances=${item.instance_count}${item.pipeline_stage ? ` · ${escapeHtml(String(item.pipeline_stage))}` : ""}</div>
       </div>
     `;
     grid.appendChild(card);
@@ -1379,48 +1426,57 @@ async function loadActiveExemplars() {
   renderActiveExemplars();
 }
 
-async function loadGallery() {
+async function loadGallery(options = {}) {
   if (state.galleryView === "PET" && !state.activePetId) {
     throw new Error("PET bucket view는 pet 버튼 선택 후 사용할 수 있습니다.");
   }
+  state.galleryLoadInFlight = true;
   const pageSize = 100;
-  const baseParams = {
-    date: currentDate() || null,
-    tab: currentTabForApi(),
-    pet_id: state.galleryView === "PET" ? state.activePetId : null,
-    include_seed: false,
-    limit: pageSize,
-  };
+  try {
+    const baseParams = {
+      date: currentDate() || null,
+      tab: currentTabForApi(),
+      pet_id: state.galleryView === "PET" ? state.activePetId : null,
+      include_seed: false,
+      limit: pageSize,
+    };
 
-  let offset = 0;
-  let totalCount = 0;
-  const allItems = [];
-  while (true) {
-    const data = await api(`/images${toQuery({ ...baseParams, offset })}`);
-    const pageItems = Array.isArray(data.items) ? data.items : [];
-    totalCount = Number(data.count || 0);
-    allItems.push(...pageItems);
-    if (!pageItems.length) break;
-    offset += pageItems.length;
-    if (allItems.length >= totalCount) break;
-    if (pageItems.length < pageSize) break;
+    let offset = 0;
+    let totalCount = 0;
+    const allItems = [];
+    while (true) {
+      const data = await api(`/images${toQuery({ ...baseParams, offset })}`);
+      const pageItems = Array.isArray(data.items) ? data.items : [];
+      totalCount = Number(data.count || 0);
+      allItems.push(...pageItems);
+      if (!pageItems.length) break;
+      offset += pageItems.length;
+      if (allItems.length >= totalCount) break;
+      if (pageItems.length < pageSize) break;
+    }
+
+    state.originalGalleryItems = allItems;
+    state.galleryTotalCount = Math.max(totalCount, allItems.length);
+    state.galleryPage = 1;
+    applyGalleryPageSlice();
+    state.selectedImageIds.clear();
+    state.imageMetaCache.clear();
+    state.searchScores = {};
+    state.galleryAutoRefreshEnabled = hasPendingGalleryItems(allItems) || Date.now() < Number(state.galleryAutoRefreshUntil || 0);
+    renderGallery();
+    log("Loaded gallery", {
+      view: state.galleryView,
+      count: state.originalGalleryItems.length,
+      total_count: state.galleryTotalCount,
+      pages: Math.max(1, Math.ceil(state.originalGalleryItems.length / pageSize)),
+      pet_id: state.activePetId,
+      auto_refresh: state.galleryAutoRefreshEnabled,
+      reason: options.reason || "manual",
+    });
+  } finally {
+    state.galleryLoadInFlight = false;
+    scheduleGalleryAutoRefresh();
   }
-
-  state.originalGalleryItems = allItems;
-  state.galleryTotalCount = Math.max(totalCount, allItems.length);
-  state.galleryPage = 1;
-  applyGalleryPageSlice();
-  state.selectedImageIds.clear();
-  state.imageMetaCache.clear();
-  state.searchScores = {};
-  renderGallery();
-  log("Loaded gallery", {
-    view: state.galleryView,
-    count: state.originalGalleryItems.length,
-    total_count: state.galleryTotalCount,
-    pages: Math.max(1, Math.ceil(state.originalGalleryItems.length / pageSize)),
-    pet_id: state.activePetId,
-  });
 }
 
 async function inspectImage(imageId) {
@@ -1637,6 +1693,7 @@ async function quickUploadExemplar() {
   try {
     const data = await api("/exemplars/upload", { method: "POST", body: fd });
     log("Quick seed upload done", data);
+    startGalleryAutoRefreshWindow();
     await loadWorkspace();
   } catch (err) {
     throw new Error(explainQuickUploadError(err));
@@ -1710,6 +1767,7 @@ async function folderUploadExemplars() {
       existing_name_policy: state.folderSeedPolicy,
       results_count: results.length,
     });
+    startGalleryAutoRefreshWindow();
     await loadWorkspace();
   } finally {
     if (uploadButton) uploadButton.textContent = originalLabel;
@@ -1737,6 +1795,7 @@ async function dailyUploadImages() {
     }
   }
   log("Daily upload done", { succeeded: success, failed, captured_at: capturedAt || null });
+  if (success > 0) startGalleryAutoRefreshWindow();
   if (state.galleryView === "PET") {
     state.galleryView = "ALL";
     syncViewButtons();

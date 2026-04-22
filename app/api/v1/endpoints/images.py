@@ -15,10 +15,13 @@ from app.utils.timezone import business_tz
 from fastapi import APIRouter, HTTPException, Query, Request
 from qdrant_client.http import models as qm
 from fastapi.responses import FileResponse
+from sqlalchemy import select
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
+from app.db.models.reid import ImageRecord
+from app.db.repositories import ReIdRepository
 from app.schemas.images import CalendarDayCountItem, GalleryImageItem, ImageDeleteResponse, ImageMetaResponse, ImagesCalendarResponse, ImagesListResponse
 from app.schemas.ingest import BBox, InstanceOut
 from app.vector_db.qdrant_store import QdrantStore, build_filter
@@ -32,6 +35,13 @@ def _get_store(request: Request) -> QdrantStore:
     if store is None:
         raise HTTPException(status_code=503, detail="Vector DB not ready")
     return store
+
+
+def _get_db(request: Request):
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database manager not ready")
+    return db
 
 
 def _meta_path(image_id: str) -> Path:
@@ -254,13 +264,12 @@ def _build_item_from_db(image_id: str, agg: dict, meta: Optional[dict]) -> Galle
         return item
 
     cap_ts = agg.get("captured_at_ts")
-    captured_at = None
-    uploaded_at = datetime.now(timezone.utc)
+    captured_at = agg.get("captured_at")
+    uploaded_at = agg.get("uploaded_at") or datetime.now(timezone.utc)
     if cap_ts is not None:
         try:
             cap_dt = datetime.fromtimestamp(int(cap_ts), tz=timezone.utc)
             captured_at = cap_dt
-            uploaded_at = cap_dt
         except Exception:
             pass
 
@@ -270,11 +279,17 @@ def _build_item_from_db(image_id: str, agg: dict, meta: Optional[dict]) -> Galle
         trainer_id=agg.get("trainer_id"),
         captured_at=captured_at,
         uploaded_at=uploaded_at,
-        width=0,
-        height=0,
+        ingest_status=agg.get("ingest_status"),
+        pipeline_stage=agg.get("pipeline_stage"),
+        width=int(agg.get("width") or 0),
+        height=int(agg.get("height") or 0),
         raw_url=f"{settings.api_prefix}/images/{image_id}?variant=raw",
         thumb_url=f"{settings.api_prefix}/images/{image_id}?variant=thumb",
-        img_name=(str((meta or {}).get("image", {}).get("original_filename") or "").strip() or None) if meta is not None else None,
+        img_name=(
+            (str((meta or {}).get("image", {}).get("original_filename") or "").strip() or None)
+            if meta is not None
+            else (str(agg.get("original_filename") or "").strip() or None)
+        ),
         instance_count=int(agg.get("instance_count") or 0),
         pet_ids=pet_ids,
     )
@@ -308,9 +323,37 @@ def _entry_from_meta(meta: dict) -> Optional[dict]:
         "image_role": image_role,
         "trainer_id": img.get("trainer_id"),
         "captured_at_ts": _pick_meta_ts(meta),
+        "captured_at": img.get("captured_at"),
+        "uploaded_at": datetime.fromisoformat(str(img.get("uploaded_at")).replace("Z", "+00:00")) if img.get("uploaded_at") else None,
+        "ingest_status": str(img.get("ingest_status") or "").upper() or None,
+        "pipeline_stage": str(img.get("pipeline_stage") or "").strip() or None,
+        "width": int(img.get("width") or 0),
+        "height": int(img.get("height") or 0),
+        "original_filename": str(img.get("original_filename") or "").strip() or None,
         "instance_count": int(img.get("instance_count") or len(instances) or 0),
         "has_unclassified": _is_unclassified(meta),
         "pet_hits": set(pet_hits),
+    }
+
+
+def _entry_from_image_record(record: ImageRecord) -> dict:
+    base_dt = record.captured_at or record.uploaded_at
+    captured_at_ts = int(base_dt.timestamp()) if base_dt is not None else None
+    return {
+        "image_id": record.image_id,
+        "image_role": str(record.image_role or "DAILY").upper(),
+        "trainer_id": record.trainer_id,
+        "captured_at_ts": captured_at_ts,
+        "captured_at": record.captured_at,
+        "uploaded_at": record.uploaded_at,
+        "ingest_status": str(record.ingest_status or "").upper() or None,
+        "pipeline_stage": str(record.pipeline_stage or "").strip() or None,
+        "width": int(record.width or 0),
+        "height": int(record.height or 0),
+        "original_filename": record.original_filename,
+        "instance_count": int(record.source_detection_count or 0),
+        "has_unclassified": True,
+        "pet_hits": set(),
     }
 
 
@@ -439,6 +482,41 @@ async def list_images(
                 existing["has_unclassified"] = bool(existing.get("has_unclassified")) or bool(entry.get("has_unclassified"))
                 existing["pet_hits"].update(entry.get("pet_hits") or set())
 
+    db = getattr(request.app.state, "db", None)
+    if db is not None:
+        with db.session_scope() as session:
+            stmt = select(ImageRecord).where(ImageRecord.ingest_status == "READY")
+            if not include_seed:
+                stmt = stmt.where(ImageRecord.image_role != "SEED")
+            if day_obj is not None:
+                stmt = stmt.where(ImageRecord.business_date == day_obj)
+            records = list(session.execute(stmt).scalars())
+            for record in records:
+                entry = _entry_from_image_record(record)
+                existing = by_image.get(record.image_id)
+                if existing is None:
+                    by_image[record.image_id] = entry
+                    continue
+                if existing.get("captured_at_ts") is None and entry.get("captured_at_ts") is not None:
+                    existing["captured_at_ts"] = entry.get("captured_at_ts")
+                if not existing.get("captured_at") and entry.get("captured_at") is not None:
+                    existing["captured_at"] = entry.get("captured_at")
+                if not existing.get("uploaded_at") and entry.get("uploaded_at") is not None:
+                    existing["uploaded_at"] = entry.get("uploaded_at")
+                if not existing.get("ingest_status") and entry.get("ingest_status"):
+                    existing["ingest_status"] = entry.get("ingest_status")
+                if not existing.get("pipeline_stage") and entry.get("pipeline_stage"):
+                    existing["pipeline_stage"] = entry.get("pipeline_stage")
+                if not existing.get("trainer_id") and entry.get("trainer_id"):
+                    existing["trainer_id"] = entry.get("trainer_id")
+                existing["width"] = max(int(existing.get("width") or 0), int(entry.get("width") or 0))
+                existing["height"] = max(int(existing.get("height") or 0), int(entry.get("height") or 0))
+                if not existing.get("original_filename") and entry.get("original_filename"):
+                    existing["original_filename"] = entry.get("original_filename")
+                existing["instance_count"] = max(int(existing.get("instance_count") or 0), int(entry.get("instance_count") or 0))
+                existing["has_unclassified"] = bool(existing.get("has_unclassified")) or bool(entry.get("has_unclassified"))
+                existing["pet_hits"].update(entry.get("pet_hits") or set())
+
     filtered: List[dict] = []
     for _img_id, entry in by_image.items():
         if tab == "ALL":
@@ -535,15 +613,23 @@ async def download_daily_zip(
 
 @router.get("/images/{image_id}")
 def get_image(
+    request: Request,
     image_id: str,
     variant: str = Query(default="raw", description="raw|thumb"),
 ):
-    meta = _read_meta(image_id)
-    img = meta.get("image") or {}
-    if variant == "thumb":
-        path = img.get("thumb_path")
-    else:
-        path = img.get("raw_path")
+    meta = _read_meta_safe(image_id)
+    path = None
+    if meta is not None:
+        img = meta.get("image") or {}
+        path = img.get("thumb_path") if variant == "thumb" else img.get("raw_path")
+    if not path:
+        db = _get_db(request)
+        with db.session_scope() as session:
+            repo = ReIdRepository(session)
+            image = repo.get_image(image_id)
+            if image is None:
+                raise HTTPException(status_code=404, detail="Image file not found")
+            path = image.thumb_path if variant == "thumb" else image.raw_path
     if not path:
         raise HTTPException(status_code=404, detail="Image file not found")
     p = Path(str(path))
@@ -554,28 +640,57 @@ def get_image(
 
 
 @router.get("/images/{image_id}/meta", response_model=ImageMetaResponse)
-def get_image_meta(image_id: str):
-    meta = _read_meta(image_id)
-    item = _build_item(meta)
-    instances = []
-    for x in meta.get("instances") or []:
-        bb = x.get("bbox") or {}
-        instances.append(
-            InstanceOut(
-                instance_id=str(x.get("instance_id")),
-                class_id=int(x.get("class_id") or 0),
-                species=str(x.get("species") or "UNKNOWN"),
-                confidence=float(x.get("confidence") or 0.0),
-                bbox=BBox(
-                    x1=float(bb.get("x1") or 0.0),
-                    y1=float(bb.get("y1") or 0.0),
-                    x2=float(bb.get("x2") or 0.0),
-                    y2=float(bb.get("y2") or 0.0),
-                ),
-                pet_id=(str(x.get("pet_id")) if x.get("pet_id") is not None else None),
+def get_image_meta(request: Request, image_id: str):
+    meta = _read_meta_safe(image_id)
+    if meta is not None:
+        item = _build_item(meta)
+        instances = []
+        for x in meta.get("instances") or []:
+            bb = x.get("bbox") or {}
+            instances.append(
+                InstanceOut(
+                    instance_id=str(x.get("instance_id")),
+                    class_id=int(x.get("class_id") or 0),
+                    species=str(x.get("species") or "UNKNOWN"),
+                    confidence=float(x.get("confidence") or 0.0),
+                    bbox=BBox(
+                        x1=float(bb.get("x1") or 0.0),
+                        y1=float(bb.get("y1") or 0.0),
+                        x2=float(bb.get("x2") or 0.0),
+                        y2=float(bb.get("y2") or 0.0),
+                    ),
+                    pet_id=(str(x.get("pet_id")) if x.get("pet_id") is not None else None),
+                )
             )
-        )
-    return ImageMetaResponse(image=item, instances=instances)
+        return ImageMetaResponse(image=item, instances=instances)
+
+    db = _get_db(request)
+    with db.session_scope() as session:
+        repo = ReIdRepository(session)
+        image = repo.get_image(image_id)
+        if image is None:
+            raise HTTPException(status_code=404, detail="Image meta not found")
+
+    item = _build_item_from_db(
+        image_id,
+        {
+            "image_id": image.image_id,
+            "image_role": image.image_role,
+            "trainer_id": image.trainer_id,
+            "captured_at_ts": int((image.captured_at or image.uploaded_at).timestamp()) if (image.captured_at or image.uploaded_at) else None,
+            "captured_at": image.captured_at,
+            "uploaded_at": image.uploaded_at,
+            "ingest_status": image.ingest_status,
+            "pipeline_stage": image.pipeline_stage,
+            "width": image.width,
+            "height": image.height,
+            "original_filename": image.original_filename,
+            "instance_count": int(image.source_detection_count or 0),
+            "pet_hits": set(),
+        },
+        None,
+    )
+    return ImageMetaResponse(image=item, instances=[])
 
 
 @router.delete("/images/{image_id}", response_model=ImageDeleteResponse)

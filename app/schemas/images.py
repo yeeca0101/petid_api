@@ -14,6 +14,8 @@ class GalleryImageItem(BaseModel):
     trainer_id: Optional[str] = None
     captured_at: Optional[datetime] = None
     uploaded_at: datetime
+    ingest_status: Optional[Literal["PENDING", "PROCESSING", "READY", "FAILED"]] = None
+    pipeline_stage: Optional[str] = None
     width: int
     height: int
     raw_url: str = Field(..., description="Relative URL for original image bytes")
