@@ -6,7 +6,7 @@ import threading
 import time
 import traceback
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Protocol
 
@@ -159,6 +159,18 @@ class QueueWorker:
         finally:
             stop_event.set()
             heartbeat_thread.join(timeout=self.config.heartbeat_interval_s + 1.0)
+
+    def adopt_claimed_job(self, claim: ClaimedJob, *, worker_id: str | None = None) -> ClaimedJob:
+        lease_worker_id = worker_id or self.config.worker_id
+        with self.db.session_scope() as session:
+            repo = ReIdRepository(session)
+            repo.reassign_job_lease(claim.job_id, worker_id=lease_worker_id, heartbeat_at=_utcnow())
+            repo.append_job_event(
+                job_id=claim.job_id,
+                event_type="JOB_LEASE_REASSIGNED",
+                payload={"worker_id": lease_worker_id, "previous_worker_id": claim.leased_by},
+            )
+        return replace(claim, leased_by=lease_worker_id)
 
     def _mark_running(self, *, job_id: uuid.UUID, worker_id: str | None = None) -> None:
         event_worker_id = worker_id or self.config.worker_id

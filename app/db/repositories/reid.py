@@ -352,6 +352,22 @@ class ReIdRepository:
         self.session.flush()
         return record
 
+    def reassign_job_lease(
+        self,
+        job_id: uuid.UUID,
+        *,
+        worker_id: str,
+        heartbeat_at: Optional[datetime] = None,
+    ) -> JobRecord:
+        record = self._require_job(job_id)
+        if record.status != "LEASED":
+            raise ValueError(f"cannot reassign lease for job in status={record.status}")
+        current_time = heartbeat_at or _utcnow()
+        record.locked_by = worker_id
+        record.heartbeat_at = current_time
+        self.session.flush()
+        return record
+
     def claim_next_job(
         self,
         *,

@@ -161,17 +161,25 @@ def _run_multi_slot(*, db: DatabaseManager, base_worker_id: str) -> int:
     def slot_loop(slot: IngestPipelineSlot, worker: QueueWorker) -> None:
         while True:
             claim = dispatch_queue.get()
-            active_jobs.mark_running(job_id=claim.job_id, slot_id=slot.slot_id, worker_id=slot.worker_id)
-            logger.info(
-                "Slot worker executing claimed job | slot_id=%s | worker_id=%s | job_id=%s | leased_by=%s",
-                slot.slot_id,
-                slot.worker_id,
-                claim.job_id,
-                claim.leased_by,
-            )
-            log_active_job_summary("Active job registry updated after slot start")
             try:
+                claim = worker.adopt_claimed_job(claim, worker_id=slot.worker_id)
+                active_jobs.mark_running(job_id=claim.job_id, slot_id=slot.slot_id, worker_id=slot.worker_id)
+                logger.info(
+                    "Slot worker executing claimed job | slot_id=%s | worker_id=%s | job_id=%s | leased_by=%s",
+                    slot.slot_id,
+                    slot.worker_id,
+                    claim.job_id,
+                    claim.leased_by,
+                )
+                log_active_job_summary("Active job registry updated after slot start")
                 worker.process_claimed_job(claim, worker_id=slot.worker_id)
+            except Exception:
+                logger.exception(
+                    "Slot worker loop recovered from unexpected error | slot_id=%s | worker_id=%s | job_id=%s",
+                    slot.slot_id,
+                    slot.worker_id,
+                    claim.job_id,
+                )
             finally:
                 active_jobs.mark_finished(job_id=claim.job_id)
                 log_active_job_summary("Active job registry updated after slot finish")

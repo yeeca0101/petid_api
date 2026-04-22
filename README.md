@@ -146,6 +146,37 @@ Example with the dev container:
 docker exec -it petid_api_dev python3 -m app.tools.ingest_slot_recommend --probe-runtime
 ```
 
+### Rollout Validation Checklist
+Use this checklist before raising slot count in a new environment:
+
+1. Set `INGEST_PIPELINE_PROBE_IMAGE` to a representative daily image.
+2. Run `python3 -m app.tools.ingest_slot_recommend --probe-runtime` in the worker environment.
+3. Start with the recommended slot count or lower.
+4. Confirm that `INGEST_PIPELINE_SLOTS=2` initializes two slot worker ids in logs when testing 2-slot mode.
+5. Confirm that jobs move through `LEASED` and `RUNNING` with slot-specific worker ids.
+6. Confirm that one running slot does not block the other slot from starting the next job.
+7. Watch queue/admin endpoints during a small burst and confirm PostgreSQL remains the durable backlog owner.
+
+### Example Starting Points
+These are conservative starting points for rollout planning, not guaranteed limits:
+
+24GB GPU host:
+```env
+INGEST_PIPELINE_SLOTS=2
+INGEST_PIPELINE_LOCAL_QUEUE_CAPACITY=2
+```
+
+48GB GPU host:
+```env
+INGEST_PIPELINE_SLOTS=4
+INGEST_PIPELINE_LOCAL_QUEUE_CAPACITY=4
+```
+
+Notes:
+- Final slot count should still be adjusted using `--probe-runtime` in the target environment.
+- Host RAM can become the limiting resource before VRAM does.
+- Increase slot count gradually and verify queue/admin health after each change.
+
 Open:
 - Swagger UI: `http://<server-ip>:8009/docs`
 - Health: `http://<server-ip>:8009/v1/health`
