@@ -4,8 +4,14 @@ import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any, Protocol
 
-from app.worker.queue import ClaimedJob
+
+class ClaimedJobLike(Protocol):
+    job_id: uuid.UUID
+    job_type: str
+    payload: dict[str, Any]
+    leased_by: str
 
 
 def _utcnow() -> datetime:
@@ -24,6 +30,16 @@ class ActiveJobRecord:
     started_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class ActiveJobSummary:
+    occupancy_count: int
+    claimed_job_count: int
+    running_slot_count: int
+    claimed_job_ids: tuple[str, ...]
+    running_job_ids: tuple[str, ...]
+    running_slots: tuple[str, ...]
+
+
 class ActiveJobRegistry:
     """In-process slot runtime state for claimed and running jobs."""
 
@@ -31,7 +47,7 @@ class ActiveJobRegistry:
         self._lock = threading.Lock()
         self._jobs: dict[uuid.UUID, ActiveJobRecord] = {}
 
-    def register_claim(self, claim: ClaimedJob) -> None:
+    def register_claim(self, claim: ClaimedJobLike) -> None:
         claimed_at = _utcnow()
         with self._lock:
             self._jobs[claim.job_id] = ActiveJobRecord(
@@ -43,6 +59,12 @@ class ActiveJobRegistry:
                 state="CLAIMED",
                 claimed_at=claimed_at,
             )
+
+    def release_claim(self, *, job_id: uuid.UUID) -> None:
+        with self._lock:
+            if job_id not in self._jobs:
+                return
+            del self._jobs[job_id]
 
     def mark_running(self, *, job_id: uuid.UUID, slot_id: str, worker_id: str) -> None:
         started_at = _utcnow()
@@ -70,6 +92,33 @@ class ActiveJobRegistry:
     def running_slot_count(self) -> int:
         with self._lock:
             return sum(1 for record in self._jobs.values() if record.state == "RUNNING" and record.slot_id is not None)
+
+    def claimed_job_count(self) -> int:
+        with self._lock:
+            return sum(1 for record in self._jobs.values() if record.state == "CLAIMED")
+
+    def occupancy_count(self) -> int:
+        with self._lock:
+            return len(self._jobs)
+
+    def summary(self) -> ActiveJobSummary:
+        with self._lock:
+            claimed_job_ids = tuple(
+                str(record.job_id) for record in self._jobs.values() if record.state == "CLAIMED"
+            )
+            running_records = tuple(record for record in self._jobs.values() if record.state == "RUNNING")
+            return ActiveJobSummary(
+                occupancy_count=len(self._jobs),
+                claimed_job_count=len(claimed_job_ids),
+                running_slot_count=len(running_records),
+                claimed_job_ids=claimed_job_ids,
+                running_job_ids=tuple(str(record.job_id) for record in running_records),
+                running_slots=tuple(
+                    record.slot_id
+                    for record in running_records
+                    if record.slot_id is not None
+                ),
+            )
 
     def snapshot(self) -> list[ActiveJobRecord]:
         with self._lock:

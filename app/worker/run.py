@@ -147,8 +147,16 @@ def _run_multi_slot(*, db: DatabaseManager, base_worker_id: str) -> int:
     )
     occupancy_limit = settings.ingest_pipeline_slots + settings.ingest_pipeline_local_queue_capacity
 
-    def active_slot_count() -> int:
-        return active_jobs.running_slot_count()
+    def log_active_job_summary(message: str) -> None:
+        summary = active_jobs.summary()
+        logger.info(
+            "%s | occupancy=%s | claimed_jobs=%s | running_slots=%s | running_job_ids=%s",
+            message,
+            summary.occupancy_count,
+            summary.claimed_job_count,
+            ",".join(summary.running_slots) or "-",
+            ",".join(summary.running_job_ids) or "-",
+        )
 
     def slot_loop(slot: IngestPipelineSlot, worker: QueueWorker) -> None:
         while True:
@@ -161,10 +169,12 @@ def _run_multi_slot(*, db: DatabaseManager, base_worker_id: str) -> int:
                 claim.job_id,
                 claim.leased_by,
             )
+            log_active_job_summary("Active job registry updated after slot start")
             try:
                 worker.process_claimed_job(claim, worker_id=slot.worker_id)
             finally:
                 active_jobs.mark_finished(job_id=claim.job_id)
+                log_active_job_summary("Active job registry updated after slot finish")
                 dispatch_queue.task_done()
 
     slot_threads = [
@@ -189,9 +199,8 @@ def _run_multi_slot(*, db: DatabaseManager, base_worker_id: str) -> int:
     try:
         while True:
             coordinator.reap_stale_jobs()
-            current_active_slots = active_slot_count()
-            current_queue_size = dispatch_queue.qsize()
-            if current_active_slots + current_queue_size >= occupancy_limit:
+            current_summary = active_jobs.summary()
+            if current_summary.occupancy_count >= occupancy_limit:
                 time.sleep(coordinator.config.poll_interval_s)
                 continue
 
@@ -201,14 +210,26 @@ def _run_multi_slot(*, db: DatabaseManager, base_worker_id: str) -> int:
                 continue
 
             active_jobs.register_claim(claim)
-            dispatch_queue.put_nowait(claim)
+            try:
+                dispatch_queue.put_nowait(claim)
+            except queue.Full:
+                active_jobs.release_claim(job_id=claim.job_id)
+                logger.warning(
+                    "Coordinator dispatch queue unexpectedly full after claim | job_id=%s | leased_by=%s",
+                    claim.job_id,
+                    claim.leased_by,
+                )
+                time.sleep(coordinator.config.poll_interval_s)
+                continue
             logger.info(
-                "Coordinator dispatched claimed job | job_id=%s | leased_by=%s | active_slots=%s | dispatch_queue_size=%s",
+                "Coordinator dispatched claimed job | job_id=%s | leased_by=%s | running_slots=%s | claimed_jobs=%s | occupancy=%s",
                 claim.job_id,
                 claim.leased_by,
-                current_active_slots,
-                current_queue_size + 1,
+                current_summary.running_slot_count,
+                current_summary.claimed_job_count + 1,
+                current_summary.occupancy_count + 1,
             )
+            log_active_job_summary("Active job registry updated after dispatch")
     finally:
         for scheduler in schedulers:
             scheduler.stop()

@@ -95,14 +95,35 @@ Notes:
 - The queue worker now handles `INGEST_PIPELINE` jobs and performs detect/embed/upsert in the worker process
 - Exemplar quick/folder uploads also use the queue path when PostgreSQL queue mode is enabled
 - Slice 10 import/reconciliation tooling currently covers filesystem sidecars plus PostgreSQL state; direct Qdrant parity scanning is not included yet
-- Current runtime behavior is still effectively sequential for ingest execution:
-  - one worker process claims one job at a time
-  - one V1 scheduler lane runs one inflight job at a time
-  - `QUEUE_LOCAL_CAPACITY` is not a parallelism knob
-- Planned future knob for higher throughput is slot-based ingest parallelism:
-  - `INGEST_PIPELINE_SLOTS`
-  - this should be interpreted as pipeline replica count, not generic thread count
-  - these settings are not active in the current code yet
+- Slot-based ingest parallelism is now active in the queue worker:
+  - `INGEST_PIPELINE_SLOTS` controls ingest pipeline replica count
+  - `INGEST_PIPELINE_LOCAL_QUEUE_CAPACITY` controls the bounded local dispatch queue in multi-slot mode
+  - `QUEUE_LOCAL_CAPACITY` still applies inside each slot-local scheduler lane and is not the top-level parallelism knob
+- Backpressure in multi-slot mode is enforced by the coordinator so PostgreSQL remains the durable backlog owner.
+- `INGEST_PIPELINE_SLOTS=1` preserves the single-slot execution path.
+
+### Slot-Based Ingest Runtime
+Use these environment variables for queue-worker ingest parallelism:
+
+```env
+INGEST_PIPELINE_SLOTS=1
+INGEST_PIPELINE_LOCAL_QUEUE_CAPACITY=2
+```
+
+Operational meaning:
+- `INGEST_PIPELINE_SLOTS` is the number of ingest pipeline replicas inside one worker process.
+- Each slot owns its own detector/embedder/resource bundle.
+- The coordinator claims jobs only when there is free in-process capacity.
+
+### Dev Validation Note
+Confirmed on 2026-04-22:
+- `docker compose -f compose.dev.yml up -d` was used with 2-slot settings and the dev stack started successfully.
+
+Example 2-slot dev worker settings:
+```env
+INGEST_PIPELINE_SLOTS=2
+INGEST_PIPELINE_LOCAL_QUEUE_CAPACITY=2
+```
 
 Open:
 - Swagger UI: `http://<server-ip>:8009/docs`
