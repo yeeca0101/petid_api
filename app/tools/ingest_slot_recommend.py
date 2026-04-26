@@ -57,6 +57,13 @@ class RuntimeProbeUsage:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Recommend a conservative INGEST_PIPELINE_SLOTS value for the current machine.",
+        epilog=(
+            "Examples:\n"
+            "  python3 -m app.tools.ingest_slot_recommend\n"
+            "  python3 -m app.tools.ingest_slot_recommend --probe-runtime\n"
+            "  python3 -m app.tools.ingest_slot_recommend --probe-runtime --image-role SEED\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--per-slot-vram-gb",

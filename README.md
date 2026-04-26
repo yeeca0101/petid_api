@@ -43,6 +43,7 @@ This clears the PostgreSQL schema, deletes the Qdrant collection, and removes ge
 Default compose settings:
 - API: `http://<server-ip>:8000`
 - Qdrant: `http://<server-ip>:6333`
+- pgAdmin: `http://<server-ip>:5050`
 - `QDRANT_URL` is overridden to `http://qdrant:6333` inside the API container
 - `DEVICE` defaults to `cpu`; set `DEVICE=cuda:0` when running on a GPU host
 
@@ -60,6 +61,7 @@ Dev endpoints:
 - API workspace port: `http://localhost:8009`
 - Admin dashboard: `http://localhost:8009/admin`
 - Qdrant: `http://localhost:6333`
+- pgAdmin: `http://localhost:5050`
 
 Optional clean start:
 ```bash
@@ -109,10 +111,19 @@ Notes:
 - Slice 10 import/reconciliation tooling currently covers filesystem sidecars plus PostgreSQL state; direct Qdrant parity scanning is not included yet
 - Slot-based ingest parallelism is now active in the queue worker:
   - `INGEST_PIPELINE_SLOTS` controls ingest pipeline replica count
-  - `INGEST_PIPELINE_LOCAL_QUEUE_CAPACITY` controls the bounded local dispatch queue in multi-slot mode
+  - `INGEST_PIPELINE_LOCAL_QUEUE_CAPACITY` controls the shared local dispatch queue for all slots
   - `QUEUE_LOCAL_CAPACITY` still applies inside each slot-local scheduler lane and is not the top-level parallelism knob
 - Backpressure in multi-slot mode is enforced by the coordinator so PostgreSQL remains the durable backlog owner.
 - `INGEST_PIPELINE_SLOTS=1` preserves the single-slot execution path.
+
+### Local Queue Capacity
+`INGEST_PIPELINE_LOCAL_QUEUE_CAPACITY` is the shared in-process dispatch queue size for all slots.
+
+Practical reading:
+- `INGEST_PIPELINE_SLOTS` decides how many jobs can execute at the same time.
+- `INGEST_PIPELINE_LOCAL_QUEUE_CAPACITY` decides how many claimed jobs can wait in memory before a slot picks them up.
+- A larger value absorbs bursts, but also keeps more claimed jobs inside the worker process.
+- In most dev/test runs, keeping this close to the slot count or in the low tens is enough.
 
 ### Slot-Based Ingest Runtime
 Use these environment variables for queue-worker ingest parallelism:
@@ -144,6 +155,12 @@ Use the built-in recommendation CLI with a probe image to measure a conservative
 python3 -m app.tools.ingest_slot_recommend --probe-runtime
 ```
 
+To see the full CLI help and flags:
+
+```bash
+python3 -m app.tools.ingest_slot_recommend --help
+```
+
 Runtime probe behavior:
 - Requires `INGEST_PIPELINE_PROBE_IMAGE` to point to a readable image file.
 - Builds the detector/embedder stack used by the ingest worker.
@@ -151,6 +168,7 @@ Runtime probe behavior:
 - Reports measured RAM deltas and, when CUDA stats are available, measured VRAM deltas.
 - Reuses `INGEST_PIPELINE_RECOMMEND_SAFETY_VRAM_GB` and `INGEST_PIPELINE_RECOMMEND_SAFETY_RAM_GB`.
 - Run this mode inside the dev container or another Python environment where the app dependencies and model weights are available.
+
 
 Example with the dev container:
 
