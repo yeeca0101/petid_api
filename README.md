@@ -34,6 +34,12 @@ YOLO_TASK=segment
 docker compose up --build
 ```
 
+Optional clean start for development or test runs:
+```bash
+RESET_DB_ON_START=1 RESET_STORAGE_ON_START=1 docker compose up --build
+```
+This clears the PostgreSQL schema, deletes the Qdrant collection, and removes generated filesystem storage before the app starts.
+
 Default compose settings:
 - API: `http://<server-ip>:8000`
 - Qdrant: `http://<server-ip>:6333`
@@ -54,6 +60,12 @@ Dev endpoints:
 - API workspace port: `http://localhost:8009`
 - Admin dashboard: `http://localhost:8009/admin`
 - Qdrant: `http://localhost:6333`
+
+Optional clean start:
+```bash
+RESET_DB_ON_START=1 RESET_STORAGE_ON_START=1 docker compose -f compose.dev.yml up --build
+```
+This clears the PostgreSQL schema, deletes the Qdrant collection, and removes generated filesystem storage before the app starts.
 
 Dev behavior:
 - The API dev container is a workspace container; it does not auto-start FastAPI

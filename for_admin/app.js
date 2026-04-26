@@ -386,6 +386,36 @@ async function withButtonBusy(button, task) {
   }
 }
 
+function setUploadProgress(progressId, { title = "", meta = "", value = 0, max = 1, active = true } = {}) {
+  const box = el(progressId);
+  if (!box) return;
+  const progress = box.querySelector("progress");
+  const titleEl = box.querySelector(".upload-progress-title");
+  const metaEl = box.querySelector(".upload-progress-meta");
+  box.dataset.active = active ? "true" : "false";
+  if (progress) {
+    progress.max = Math.max(1, Number(max || 1));
+    progress.value = Math.min(progress.max, Math.max(0, Number(value || 0)));
+  }
+  if (titleEl) titleEl.textContent = title;
+  if (metaEl) metaEl.textContent = meta;
+}
+
+function resetUploadProgress(progressId, meta = "") {
+  setUploadProgress(progressId, {
+    title: "대기 중",
+    meta,
+    value: 0,
+    max: 1,
+    active: false,
+  });
+}
+
+function clearFileInput(id) {
+  const input = el(id);
+  if (input) input.value = "";
+}
+
 function renderPetButtons() {
   const box = el("petButtons");
   box.innerHTML = "";
@@ -1676,6 +1706,15 @@ async function labelSelectedImages(action) {
 async function quickUploadExemplar() {
   const fileInput = el("uFile");
   if (!fileInput.files || !fileInput.files.length) throw new Error("seed 이미지 파일을 선택하세요.");
+  const progressId = "quickUploadProgress";
+  const file = fileInput.files[0];
+  setUploadProgress(progressId, {
+    title: "Seed 업로드 중",
+    meta: file.name,
+    value: 0,
+    max: 1,
+    active: true,
+  });
   const fd = new FormData();
   if (state.singleSeedMode === "append") {
     const petId = value("uExistingPet").trim();
@@ -1689,13 +1728,29 @@ async function quickUploadExemplar() {
   fd.append("updated_by", "admin_dashboard");
   fd.append("sync_label", "true");
   fd.append("apply_to_all_instances", "false");
-  fd.append("file", fileInput.files[0]);
+  fd.append("file", file);
   try {
     const data = await api("/exemplars/upload", { method: "POST", body: fd });
     log("Quick seed upload done", data);
     startGalleryAutoRefreshWindow();
+    setUploadProgress(progressId, {
+      title: "업로드 완료",
+      meta: `${file.name} 등록 완료`,
+      value: 1,
+      max: 1,
+      active: true,
+    });
+    clearFileInput("uFile");
+    resetUploadProgress(progressId, "선택한 seed 파일을 등록합니다.");
     await loadWorkspace();
   } catch (err) {
+    setUploadProgress(progressId, {
+      title: "업로드 실패",
+      meta: err.message || String(err),
+      value: 0,
+      max: 1,
+      active: true,
+    });
     throw new Error(explainQuickUploadError(err));
   }
 }
@@ -1705,13 +1760,22 @@ async function folderUploadExemplars() {
   const uploadButton = el("btnFolderUpload");
   const originalLabel = uploadButton?.textContent || "폴더 일괄 등록";
   if (!folderInput.files || !folderInput.files.length) throw new Error("pet 폴더를 선택하세요.");
+  const progressId = "folderUploadProgress";
   const files = Array.from(folderInput.files);
   const uniqueFolderCount = new Set(files.map((file) => folderGroupKey(file))).size;
   const batches = buildFolderUploadBatches(files, 24);
   let succeeded = 0;
   let failed = 0;
   let completedFolders = 0;
+  let uploadedFiles = 0;
   const results = [];
+  setUploadProgress(progressId, {
+    title: "폴더 업로드 중",
+    meta: `0 / ${files.length} 파일`,
+    value: 0,
+    max: Math.max(1, files.length),
+    active: true,
+  });
 
   try {
     for (let index = 0; index < batches.length; index += 1) {
@@ -1738,6 +1802,14 @@ async function folderUploadExemplars() {
         failed += Number(data.failed || 0);
         completedFolders += folderCount;
         if (Array.isArray(data.results)) results.push(...data.results);
+        uploadedFiles += batchFiles.length;
+        setUploadProgress(progressId, {
+          title: "폴더 업로드 중",
+          meta: `${uploadedFiles} / ${files.length} 파일`,
+          value: uploadedFiles,
+          max: Math.max(1, files.length),
+          active: true,
+        });
         log("Seed folder upload batch done", {
           batch: index + 1,
           batch_count: batches.length,
@@ -1768,6 +1840,15 @@ async function folderUploadExemplars() {
       results_count: results.length,
     });
     startGalleryAutoRefreshWindow();
+    setUploadProgress(progressId, {
+      title: "업로드 완료",
+      meta: `${files.length}개 파일 등록 완료`,
+      value: files.length,
+      max: Math.max(1, files.length),
+      active: true,
+    });
+    clearFileInput("fFolder");
+    resetUploadProgress(progressId, "폴더 내부 파일을 순차 등록합니다.");
     await loadWorkspace();
   } finally {
     if (uploadButton) uploadButton.textContent = originalLabel;
@@ -1777,10 +1858,19 @@ async function folderUploadExemplars() {
 async function dailyUploadImages() {
   const input = el("dFiles");
   if (!input.files || !input.files.length) throw new Error("daily 이미지 파일을 선택하세요.");
+  const progressId = "dailyUploadProgress";
+  const files = Array.from(input.files);
   const capturedAt = workspaceCapturedAt();
   let success = 0;
   let failed = 0;
-  for (const file of Array.from(input.files)) {
+  setUploadProgress(progressId, {
+    title: "Daily 업로드 중",
+    meta: `0 / ${files.length} 파일`,
+    value: 0,
+    max: Math.max(1, files.length),
+    active: true,
+  });
+  for (const file of files) {
     const fd = new FormData();
     fd.append("trainer_id", "admin_dashboard");
     fd.append("image_role", "DAILY");
@@ -1789,13 +1879,40 @@ async function dailyUploadImages() {
     try {
       await api("/ingest", { method: "POST", body: fd });
       success += 1;
+      setUploadProgress(progressId, {
+        title: "Daily 업로드 중",
+        meta: `${success + failed} / ${files.length} 파일`,
+        value: success + failed,
+        max: Math.max(1, files.length),
+        active: true,
+      });
     } catch (err) {
       failed += 1;
       log("Daily upload failed for file", { file: file.name, error: err.message });
+      setUploadProgress(progressId, {
+        title: "Daily 업로드 중",
+        meta: `${success + failed} / ${files.length} 파일`,
+        value: success + failed,
+        max: Math.max(1, files.length),
+        active: true,
+      });
     }
   }
   log("Daily upload done", { succeeded: success, failed, captured_at: capturedAt || null });
-  if (success > 0) startGalleryAutoRefreshWindow();
+  if (success > 0) {
+    startGalleryAutoRefreshWindow();
+    setUploadProgress(progressId, {
+      title: "업로드 완료",
+      meta: `${success}개 파일 등록 완료`,
+      value: files.length,
+      max: Math.max(1, files.length),
+      active: true,
+    });
+    if (failed === 0) {
+      clearFileInput("dFiles");
+    }
+    resetUploadProgress(progressId, "선택한 daily 파일을 순차 등록합니다.");
+  }
   if (state.galleryView === "PET") {
     state.galleryView = "ALL";
     syncViewButtons();

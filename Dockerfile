@@ -33,4 +33,4 @@ RUN chmod +x /app/run_api.sh /app/run_queue_worker.sh /app/run_reid_reconcile.sh
 
 EXPOSE 8000
 
-CMD ["bash", "-lc", "if [ ! -f \"${YOLO_WEIGHTS_PATH:-/app/weights/yolo/yolo26x.pt}\" ]; then echo \"YOLO weights not found at ${YOLO_WEIGHTS_PATH:-/app/weights/yolo/yolo26x.pt}. Trying download_weights.sh...\"; bash /app/setup_scripts/download_weights.sh; fi && exec /app/run_api.sh"]
+CMD ["bash", "-lc", "if [ ! -f \"${YOLO_WEIGHTS_PATH:-/app/weights/yolo/yolo26x.pt}\" ]; then echo \"YOLO weights not found at ${YOLO_WEIGHTS_PATH:-/app/weights/yolo/yolo26x.pt}. Trying download_weights.sh...\"; bash /app/setup_scripts/download_weights.sh; fi && exec bash /app/run_api.sh"]

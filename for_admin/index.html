@@ -76,6 +76,13 @@
               <label id="singleSeedNewWrap" hidden>Pet Name<input id="uPetName" placeholder="예시: 초코" /></label>
               <label>Seed Image<input id="uFile" type="file" accept="image/*" /></label>
               <button id="btnQuickUpload">등록</button>
+              <div class="upload-progress" id="quickUploadProgress" data-active="false" aria-live="polite">
+                <progress id="quickUploadProgressBar" max="1" value="0"></progress>
+                <div class="upload-progress-copy">
+                  <span class="upload-progress-title">대기 중</span>
+                  <span class="upload-progress-meta">선택한 seed 파일을 등록합니다.</span>
+                </div>
+              </div>
             </div>
 
             <div class="stack-form grouped-form upload-card">
@@ -111,6 +118,13 @@
               </div>
               <label>Folder Seed Upload<input id="fFolder" type="file" webkitdirectory directory multiple /></label>
               <button id="btnFolderUpload">폴더 일괄 등록</button>
+              <div class="upload-progress" id="folderUploadProgress" data-active="false" aria-live="polite">
+                <progress id="folderUploadProgressBar" max="1" value="0"></progress>
+                <div class="upload-progress-copy">
+                  <span class="upload-progress-title">대기 중</span>
+                  <span class="upload-progress-meta">폴더 내부 파일을 순차 등록합니다.</span>
+                </div>
+              </div>
             </div>
 
             <div class="stack-form grouped-form upload-card">
@@ -131,6 +145,13 @@
               </div>
               <label>Daily Upload<input id="dFiles" type="file" accept="image/*" multiple /></label>
               <button id="btnDailyUpload">Daily 업로드</button>
+              <div class="upload-progress" id="dailyUploadProgress" data-active="false" aria-live="polite">
+                <progress id="dailyUploadProgressBar" max="1" value="0"></progress>
+                <div class="upload-progress-copy">
+                  <span class="upload-progress-title">대기 중</span>
+                  <span class="upload-progress-meta">선택한 daily 파일을 순차 등록합니다.</span>
+                </div>
+              </div>
             </div>
           </div>
         </section>

@@ -1,4 +1,42 @@
 services:
+  init-state:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: petid_init_state
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Asia/Seoul}
+      LOG_TZ: ${LOG_TZ:-Asia/Seoul}
+      BUSINESS_TZ: ${BUSINESS_TZ:-Asia/Seoul}
+      DEVICE: ${DEVICE:-cuda:0}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-petid}
+      POSTGRES_USER: ${POSTGRES_USER:-petid}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-petid_dev_password}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://petid:petid_dev_password@postgres:5432/petid}
+      QDRANT_URL: http://qdrant:6333
+      HF_CACHE_DIR: /app/weights
+      STORAGE_DIR: /app/data
+      REID_STORAGE_DIR: /app/data/reid
+      VERIFICATION_STORAGE_DIR: /app/data/verification
+      SHARED_STORAGE_DIR: /app/data/shared
+      YOLO_WEIGHTS_PATH: /app/weights/yolo/yolo26x.pt
+      GOOGLE_DRIVE_URL: ${GOOGLE_DRIVE_URL:-}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+      RESET_DB_ON_START: ${RESET_DB_ON_START:-0}
+      RESET_STORAGE_ON_START: ${RESET_STORAGE_ON_START:-0}
+    command: ["bash", "-lc", "exec python3 -m app.tools.reset_runtime_state"]
+    volumes:
+      - .:/app
+
   api:
     build:
       context: .
@@ -6,6 +44,8 @@ services:
     container_name: petid_api
     restart: unless-stopped
     depends_on:
+      init-state:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       qdrant:
@@ -45,8 +85,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./data:/app/data
-      - ./weights:/app/weights
+      - .:/app
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/v1/health"]
       interval: 30s
@@ -61,6 +100,8 @@ services:
     container_name: petid_worker
     restart: unless-stopped
     depends_on:
+      init-state:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       qdrant:
@@ -97,8 +138,7 @@ services:
               capabilities: [gpu]
     command: ["bash", "-lc", "if [ ! -f \"/app/weights/yolo/yolo26x.pt\" ]; then echo \"YOLO weights not found at /app/weights/yolo/yolo26x.pt. Trying download_weights.sh...\"; bash /app/setup_scripts/download_weights.sh; fi && exec /app/run_queue_worker.sh"]
     volumes:
-      - ./data:/app/data
-      - ./weights:/app/weights
+      - .:/app
 
   postgres:
     image: postgres:16-alpine
@@ -129,6 +169,23 @@ services:
     volumes:
       - qdrant_storage:/qdrant/storage
 
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: petid_pgadmin
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
 volumes:
   postgres_data:
   qdrant_storage:
+  pgadmin_data:

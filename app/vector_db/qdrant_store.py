@@ -55,29 +55,25 @@ class QdrantStore:
         )
 
         # Helpful payload indexes for filtering
-        try:
-            self.client.create_payload_index(
-                collection_name=self.collection,
-                field_name="daycare_id",
-                field_schema=qm.PayloadSchemaType.KEYWORD,
-            )
-            self.client.create_payload_index(
-                collection_name=self.collection,
-                field_name="image_id",
-                field_schema=qm.PayloadSchemaType.KEYWORD,
-            )
-            self.client.create_payload_index(
-                collection_name=self.collection,
-                field_name="pet_id",
-                field_schema=qm.PayloadSchemaType.KEYWORD,
-            )
-            self.client.create_payload_index(
-                collection_name=self.collection,
-                field_name="captured_at_ts",
-                field_schema=qm.PayloadSchemaType.INTEGER,
-            )
-        except Exception:
-            logger.exception("Payload index creation failed (non-fatal).")
+        for field_name, field_schema in (
+            ("daycare_id", qm.PayloadSchemaType.KEYWORD),
+            ("image_id", qm.PayloadSchemaType.KEYWORD),
+            ("pet_id", qm.PayloadSchemaType.KEYWORD),
+            ("captured_at_ts", qm.PayloadSchemaType.INTEGER),
+        ):
+            try:
+                self.client.create_payload_index(
+                    collection_name=self.collection,
+                    field_name=field_name,
+                    field_schema=field_schema,
+                )
+            except Exception:
+                logger.warning(
+                    "Payload index creation failed (non-fatal) | collection=%s | field=%s",
+                    self.collection,
+                    field_name,
+                    exc_info=False,
+                )
 
     def upsert(
         self,

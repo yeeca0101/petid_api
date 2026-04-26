@@ -275,6 +275,65 @@ h2 {
   position: relative;
 }
 
+.upload-progress {
+  display: none;
+  gap: 10px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid rgba(19, 95, 87, 0.14);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.upload-progress[data-active="true"] {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr);
+}
+
+.upload-progress progress {
+  width: 100%;
+  height: 10px;
+  border: 0;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(19, 95, 87, 0.12);
+}
+
+.upload-progress progress::-webkit-progress-bar {
+  background: rgba(19, 95, 87, 0.12);
+  border-radius: 999px;
+}
+
+.upload-progress progress::-webkit-progress-value {
+  background: linear-gradient(90deg, var(--teal), #2f8f84);
+  border-radius: 999px;
+}
+
+.upload-progress progress::-moz-progress-bar {
+  background: linear-gradient(90deg, var(--teal), #2f8f84);
+  border-radius: 999px;
+}
+
+.upload-progress-copy {
+  display: grid;
+  gap: 2px;
+}
+
+.upload-progress-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.upload-progress-meta {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
 .group-title-row {
   display: flex;
   align-items: center;
