@@ -405,12 +405,13 @@ async function withButtonBusy(button, task) {
   }
 }
 
-function setUploadProgress(progressId, { title = "", meta = "", value = 0, max = 1, active = true } = {}) {
+function setUploadProgress(progressId, { title = "", meta = "", detail = "", value = 0, max = 1, active = true } = {}) {
   const box = el(progressId);
   if (!box) return;
   const progress = box.querySelector("progress");
   const titleEl = box.querySelector(".upload-progress-title");
   const metaEl = box.querySelector(".upload-progress-meta");
+  const detailEl = box.querySelector(".upload-progress-detail");
   box.dataset.active = active ? "true" : "false";
   if (progress) {
     progress.max = Math.max(1, Number(max || 1));
@@ -418,6 +419,10 @@ function setUploadProgress(progressId, { title = "", meta = "", value = 0, max =
   }
   if (titleEl) titleEl.textContent = title;
   if (metaEl) metaEl.textContent = meta;
+  if (detailEl) {
+    detailEl.textContent = detail;
+    detailEl.hidden = !detail;
+  }
 }
 
 function resetUploadProgress(progressId, meta = "") {
@@ -435,15 +440,23 @@ function clearFileInput(id) {
   if (input) input.value = "";
 }
 
-function uploadStatusTitle(status) {
+function classifyUploadStatus(status) {
   const requestStatus = String(status?.request_status || "").toUpperCase();
   const jobStatus = String(status?.job_status || "").toUpperCase();
   const ingestStatus = String(status?.ingest_status || "").toUpperCase();
 
-  if (ingestStatus === "READY" || requestStatus === "COMPLETED" || jobStatus === "SUCCEEDED") return "완료";
-  if (ingestStatus === "FAILED" || requestStatus === "FAILED" || jobStatus === "FAILED") return "실패";
-  if (jobStatus === "RUNNING" || ingestStatus === "PROCESSING" || ingestStatus === "PENDING") return "처리 중";
-  if (jobStatus === "QUEUED" || requestStatus === "RECEIVED" || requestStatus === "QUEUED") return "대기 중";
+  if (ingestStatus === "READY" || requestStatus === "COMPLETED" || requestStatus === "SUCCEEDED" || jobStatus === "SUCCEEDED") return "completed";
+  if (ingestStatus === "FAILED" || requestStatus === "FAILED" || jobStatus === "FAILED") return "failed";
+  if (jobStatus === "RUNNING" || requestStatus === "PROCESSING" || ingestStatus === "PROCESSING") return "processing";
+  if (jobStatus === "QUEUED" || requestStatus === "RECEIVED" || requestStatus === "QUEUED" || ingestStatus === "PENDING") return "queued";
+  return "queued";
+}
+
+function uploadStatusTitle(status) {
+  const phase = classifyUploadStatus(status);
+  if (phase === "completed") return "완료";
+  if (phase === "failed") return "실패";
+  if (phase === "processing") return "처리 중";
   return "대기 중";
 }
 
@@ -456,64 +469,154 @@ function uploadStatusMeta(status) {
   return pieces.join(" · ");
 }
 
-async function waitForUploadCompletion(progressId, statusUrls, { progressValue = 0, progressMax = 1, metaPrefix = "" } = {}) {
-  const urls = Array.from(new Set((statusUrls || []).map((url) => String(url || "").trim()).filter(Boolean)));
-  if (!urls.length) {
-    setUploadProgress(progressId, {
-      title: "완료",
-      meta: metaPrefix || "DB 반영 완료",
-      value: progressMax,
-      max: progressMax,
-      active: true,
-    });
-    return [];
-  }
+function createUploadProgressTracker(progressId, { total = 1, metaPrefix = "" } = {}) {
+  const trackedUrls = new Set();
+  const latestStatuses = new Map();
+  const normalizedTotal = Math.max(1, Number(total || 1));
+  let requesting = 0;
+  let completedImmediate = 0;
+  let failedImmediate = 0;
+  let uploadsFinished = false;
+  let pollStarted = false;
+  let pollTimedOut = false;
+  let latestStatusList = [];
+  let pollPromise = null;
 
-  const startedAt = Date.now();
-  let latestStatuses = [];
-  while (Date.now() - startedAt < UPLOAD_STATUS_POLL_TIMEOUT_MS) {
-    const results = await Promise.allSettled(urls.map((url) => api(normalizeApiPath(url))));
-    latestStatuses = results
-      .filter((result) => result.status === "fulfilled")
-      .map((result) => result.value)
-      .filter(Boolean);
-
-    const completed = latestStatuses.filter((status) => uploadStatusTitle(status) === "완료").length;
-    const failed = latestStatuses.filter((status) => uploadStatusTitle(status) === "실패").length;
-    const processing = latestStatuses.filter((status) => uploadStatusTitle(status) === "처리 중").length;
-    const queued = latestStatuses.filter((status) => uploadStatusTitle(status) === "대기 중").length;
-    const overallTitle = failed > 0 ? "실패" : processing > 0 ? "처리 중" : queued > 0 ? "대기 중" : "완료";
-    const overallMeta = [
-      metaPrefix,
-      `${completed} 완료`,
-      processing > 0 ? `${processing} 처리 중` : "",
-      queued > 0 ? `${queued} 대기 중` : "",
-      failed > 0 ? `${failed} 실패` : "",
-    ]
-      .filter(Boolean)
-      .join(" · ");
-    setUploadProgress(progressId, {
-      title: overallTitle,
-      meta: overallMeta || metaPrefix || "상태 확인 중",
-      value: Math.max(progressValue, completed + failed + processing + queued),
-      max: Math.max(progressMax, urls.length),
-      active: true,
-    });
-
-    if (failed > 0 || completed === urls.length) {
-      return latestStatuses;
+  function counts() {
+    let queued = 0;
+    let processing = 0;
+    let completedTracked = 0;
+    let failedTracked = 0;
+    for (const status of latestStatuses.values()) {
+      const phase = classifyUploadStatus(status);
+      if (phase === "completed") completedTracked += 1;
+      else if (phase === "failed") failedTracked += 1;
+      else if (phase === "processing") processing += 1;
+      else queued += 1;
     }
-    await new Promise((resolve) => window.setTimeout(resolve, UPLOAD_STATUS_POLL_INTERVAL_MS));
+    return {
+      requesting,
+      queued,
+      processing,
+      completed: completedImmediate + completedTracked,
+      failed: failedImmediate + failedTracked,
+    };
   }
 
-  setUploadProgress(progressId, {
-    title: "대기 중",
-    meta: `${metaPrefix || "상태 확인"} · 상태 확인 중`,
-    value: progressValue,
-    max: progressMax,
-    active: true,
-  });
-  return latestStatuses;
+  function detailText(currentCounts) {
+    const parts = [
+      `요청 중 ${currentCounts.requesting}`,
+      `대기 중 ${currentCounts.queued}`,
+      `처리 중 ${currentCounts.processing}`,
+    ];
+    if (currentCounts.failed > 0) parts.push(`실패 ${currentCounts.failed}`);
+    return parts.join(" | ");
+  }
+
+  function render() {
+    const currentCounts = counts();
+    const terminal = currentCounts.completed + currentCounts.failed;
+    let title = "요청 중";
+    if (terminal >= normalizedTotal && currentCounts.failed === 0) title = "완료";
+    else if (terminal >= normalizedTotal && currentCounts.failed > 0 && currentCounts.completed === 0) title = "실패";
+    else if (currentCounts.processing > 0) title = "처리 중";
+    else if (currentCounts.queued > 0) title = "대기 중";
+    else if (currentCounts.requesting > 0) title = "요청 중";
+    else if (currentCounts.failed > 0) title = "실패";
+
+    const metaParts = [
+      metaPrefix,
+      `${terminal} / ${normalizedTotal} 완료`,
+      currentCounts.completed > 0 ? `${currentCounts.completed} 완료됨` : "",
+      currentCounts.failed > 0 ? `${currentCounts.failed} 실패` : "",
+      pollTimedOut ? "상태 확인 중" : "",
+    ].filter(Boolean);
+    setUploadProgress(progressId, {
+      title,
+      meta: metaParts.join(" · "),
+      detail: detailText(currentCounts),
+      value: terminal,
+      max: normalizedTotal,
+      active: true,
+    });
+  }
+
+  async function pollLoop() {
+    const startedAt = Date.now();
+    while (true) {
+      const urls = Array.from(trackedUrls);
+      if (urls.length > 0) {
+        const results = await Promise.allSettled(urls.map((url) => api(normalizeApiPath(url))));
+        latestStatusList = [];
+        for (let index = 0; index < results.length; index += 1) {
+          const result = results[index];
+          if (result.status !== "fulfilled" || !result.value) continue;
+          latestStatuses.set(urls[index], result.value);
+          latestStatusList.push(result.value);
+        }
+      }
+
+      if (Date.now() - startedAt >= UPLOAD_STATUS_POLL_TIMEOUT_MS) {
+        pollTimedOut = true;
+        render();
+        return latestStatusList;
+      }
+
+      render();
+      const currentCounts = counts();
+      const terminal = currentCounts.completed + currentCounts.failed;
+      if (uploadsFinished && currentCounts.requesting === 0 && terminal >= normalizedTotal) {
+        return latestStatusList;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, UPLOAD_STATUS_POLL_INTERVAL_MS));
+    }
+  }
+
+  function startPolling() {
+    if (pollStarted) return;
+    pollStarted = true;
+    pollPromise = pollLoop();
+  }
+
+  render();
+
+  return {
+    markRequestStarted(count = 1) {
+      requesting += Math.max(0, Number(count || 0));
+      render();
+    },
+    markRequestResolved(count = 1) {
+      requesting = Math.max(0, requesting - Math.max(0, Number(count || 0)));
+      render();
+    },
+    recordQueued(statusUrl, status = null) {
+      const normalizedUrl = String(statusUrl || "").trim();
+      if (!normalizedUrl) return;
+      trackedUrls.add(normalizedUrl);
+      latestStatuses.set(normalizedUrl, status || { request_status: "RECEIVED", job_status: "QUEUED", ingest_status: "PENDING" });
+      startPolling();
+      render();
+    },
+    recordImmediateSuccess(count = 1) {
+      completedImmediate += Math.max(0, Number(count || 0));
+      render();
+    },
+    recordImmediateFailure(count = 1) {
+      failedImmediate += Math.max(0, Number(count || 0));
+      render();
+    },
+    markUploadsFinished() {
+      uploadsFinished = true;
+      render();
+    },
+    async waitForCompletion() {
+      if (!pollPromise) {
+        render();
+        return [];
+      }
+      return pollPromise;
+    },
+  };
 }
 
 function renderPetButtons() {
@@ -1808,13 +1911,7 @@ async function quickUploadExemplar() {
   if (!fileInput.files || !fileInput.files.length) throw new Error("seed 이미지 파일을 선택하세요.");
   const progressId = "quickUploadProgress";
   const file = fileInput.files[0];
-  setUploadProgress(progressId, {
-    title: "요청 중",
-    meta: file.name,
-    value: 0,
-    max: 1,
-    active: true,
-  });
+  const tracker = createUploadProgressTracker(progressId, { total: 1, metaPrefix: file.name });
   const fd = new FormData();
   if (state.singleSeedMode === "append") {
     const petId = value("uExistingPet").trim();
@@ -1829,39 +1926,30 @@ async function quickUploadExemplar() {
   fd.append("sync_label", "true");
   fd.append("apply_to_all_instances", "false");
   fd.append("file", file);
+  tracker.markRequestStarted();
   try {
     const data = await api("/exemplars/upload", { method: "POST", body: fd });
+    tracker.markRequestResolved();
     log("Quick seed upload done", data);
     if (data?.status_url) {
-      setUploadProgress(progressId, {
-        title: "대기 중",
-        meta: `${file.name} · 요청 접수됨`,
-        value: 1,
-        max: 1,
-        active: true,
-      });
+      tracker.recordQueued(data.status_url);
       startGalleryAutoRefreshWindow();
-      await waitForUploadCompletion(progressId, [data.status_url], {
-        progressValue: 1,
-        progressMax: 1,
-        metaPrefix: `${file.name} · 요청 접수됨`,
-      });
     } else {
-      setUploadProgress(progressId, {
-        title: "완료",
-        meta: `${file.name} 등록 완료`,
-        value: 1,
-        max: 1,
-        active: true,
-      });
+      tracker.recordImmediateSuccess();
     }
+    tracker.markUploadsFinished();
+    await tracker.waitForCompletion();
     clearFileInput("uFile");
     await loadWorkspace();
     resetUploadProgress(progressId, "선택한 seed 파일을 등록합니다.");
   } catch (err) {
+    tracker.markRequestResolved();
+    tracker.recordImmediateFailure();
+    tracker.markUploadsFinished();
     setUploadProgress(progressId, {
       title: "업로드 실패",
       meta: err.message || String(err),
+      detail: "요청 중 0 | 대기 중 0 | 처리 중 0 | 실패 1",
       value: 0,
       max: 1,
       active: true,
@@ -1882,15 +1970,10 @@ async function folderUploadExemplars() {
   let succeeded = 0;
   let failed = 0;
   let completedFolders = 0;
-  let uploadedFiles = 0;
   const results = [];
-  const queuedStatusUrls = [];
-  setUploadProgress(progressId, {
-    title: "요청 중",
-    meta: `0 / ${files.length} 파일`,
-    value: 0,
-    max: Math.max(1, files.length),
-    active: true,
+  const tracker = createUploadProgressTracker(progressId, {
+    total: files.length,
+    metaPrefix: `${files.length}개 파일`,
   });
 
   try {
@@ -1912,27 +1995,39 @@ async function folderUploadExemplars() {
         fd.append("files", file);
         fd.append("relative_paths", file.webkitRelativePath || file.name);
       });
+      tracker.markRequestStarted(batchFiles.length);
       try {
         const data = await api("/exemplars/upload-folder", { method: "POST", body: fd });
+        tracker.markRequestResolved(batchFiles.length);
         succeeded += Number(data.succeeded || 0);
         failed += Number(data.failed || 0);
         completedFolders += folderCount;
         if (Array.isArray(data.results)) results.push(...data.results);
         if (Array.isArray(data.results)) {
-          queuedStatusUrls.push(
-            ...data.results
-              .filter((item) => String(item?.status || "").toLowerCase() === "queued" && item.status_url)
-              .map((item) => String(item.status_url))
-          );
+          let immediateSuccesses = 0;
+          let immediateFailures = 0;
+          data.results.forEach((item) => {
+            const itemStatus = String(item?.status || "").toLowerCase();
+            if (itemStatus === "queued" && item.status_url) {
+              tracker.recordQueued(item.status_url);
+              return;
+            }
+            if (itemStatus === "ok") {
+              immediateSuccesses += 1;
+              return;
+            }
+            if (itemStatus === "failed") {
+              immediateFailures += 1;
+            }
+          });
+          if (immediateSuccesses > 0) tracker.recordImmediateSuccess(immediateSuccesses);
+          if (immediateFailures > 0) tracker.recordImmediateFailure(immediateFailures);
+        } else {
+          const immediateSuccesses = Number(data.succeeded || 0);
+          const immediateFailures = Number(data.failed || 0);
+          if (immediateSuccesses > 0) tracker.recordImmediateSuccess(immediateSuccesses);
+          if (immediateFailures > 0) tracker.recordImmediateFailure(immediateFailures);
         }
-        uploadedFiles += batchFiles.length;
-        setUploadProgress(progressId, {
-          title: "요청 중",
-          meta: `${uploadedFiles} / ${files.length} 파일`,
-          value: uploadedFiles,
-          max: Math.max(1, files.length),
-          active: true,
-        });
         log("Seed folder upload batch done", {
           batch: index + 1,
           batch_count: batches.length,
@@ -1945,6 +2040,8 @@ async function folderUploadExemplars() {
           existing_name_policy: state.folderSeedPolicy,
         });
       } catch (err) {
+        tracker.markRequestResolved(batchFiles.length);
+        tracker.recordImmediateFailure(batchFiles.length);
         throw new Error(explainFolderUploadError(err, {
           batchIndex: index + 1,
           batchCount: batches.length,
@@ -1962,29 +2059,11 @@ async function folderUploadExemplars() {
       existing_name_policy: state.folderSeedPolicy,
       results_count: results.length,
     });
-    if (queuedStatusUrls.length > 0) {
-      setUploadProgress(progressId, {
-        title: "대기 중",
-        meta: `${files.length}개 요청 접수됨`,
-        value: files.length,
-        max: Math.max(1, files.length),
-        active: true,
-      });
+    tracker.markUploadsFinished();
+    if (results.some((item) => String(item?.status || "").toLowerCase() === "queued" && item.status_url)) {
       startGalleryAutoRefreshWindow();
-      await waitForUploadCompletion(progressId, queuedStatusUrls, {
-        progressValue: files.length,
-        progressMax: Math.max(1, files.length),
-        metaPrefix: `${files.length}개 요청 접수됨`,
-      });
-    } else {
-      setUploadProgress(progressId, {
-        title: "완료",
-        meta: `${files.length}개 파일 등록 완료`,
-        value: files.length,
-        max: Math.max(1, files.length),
-        active: true,
-      });
     }
+    await tracker.waitForCompletion();
     clearFileInput("fFolder");
     await loadWorkspace();
     resetUploadProgress(progressId, "폴더 내부 파일을 순차 등록합니다.");
@@ -2001,13 +2080,9 @@ async function dailyUploadImages() {
   const capturedAt = workspaceCapturedAt();
   let success = 0;
   let failed = 0;
-  const statusUrls = [];
-  setUploadProgress(progressId, {
-    title: "요청 중",
-    meta: `0 / ${files.length} 파일`,
-    value: 0,
-    max: Math.max(1, files.length),
-    active: true,
+  const tracker = createUploadProgressTracker(progressId, {
+    total: files.length,
+    metaPrefix: `${files.length}개 파일`,
   });
   for (const file of files) {
     const fd = new FormData();
@@ -2015,54 +2090,28 @@ async function dailyUploadImages() {
     fd.append("image_role", "DAILY");
     if (capturedAt) fd.append("captured_at", capturedAt);
     fd.append("file", file);
+    tracker.markRequestStarted();
     try {
       const data = await api("/ingest", { method: "POST", body: fd });
-      if (data?.status_url) statusUrls.push(String(data.status_url));
+      tracker.markRequestResolved();
+      if (data?.status_url) {
+        tracker.recordQueued(data.status_url);
+      } else {
+        tracker.recordImmediateSuccess();
+      }
       success += 1;
-      setUploadProgress(progressId, {
-        title: "요청 중",
-        meta: `${success + failed} / ${files.length} 파일`,
-        value: success + failed,
-        max: Math.max(1, files.length),
-        active: true,
-      });
     } catch (err) {
+      tracker.markRequestResolved();
+      tracker.recordImmediateFailure();
       failed += 1;
       log("Daily upload failed for file", { file: file.name, error: err.message });
-      setUploadProgress(progressId, {
-        title: "요청 중",
-        meta: `${success + failed} / ${files.length} 파일`,
-        value: success + failed,
-        max: Math.max(1, files.length),
-        active: true,
-      });
     }
   }
   log("Daily upload done", { succeeded: success, failed, captured_at: capturedAt || null });
+  tracker.markUploadsFinished();
   if (success > 0) {
-    if (statusUrls.length > 0) {
-      setUploadProgress(progressId, {
-        title: "대기 중",
-        meta: `${success}개 요청 접수됨`,
-        value: success + failed,
-        max: Math.max(1, files.length),
-        active: true,
-      });
-      startGalleryAutoRefreshWindow();
-      await waitForUploadCompletion(progressId, statusUrls, {
-        progressValue: success + failed,
-        progressMax: Math.max(1, files.length),
-        metaPrefix: `${success}개 요청 접수됨`,
-      });
-    } else {
-      setUploadProgress(progressId, {
-        title: "완료",
-        meta: `${success}개 파일 등록 완료`,
-        value: files.length,
-        max: Math.max(1, files.length),
-        active: true,
-      });
-    }
+    startGalleryAutoRefreshWindow();
+    await tracker.waitForCompletion();
     if (failed === 0) {
       clearFileInput("dFiles");
     }

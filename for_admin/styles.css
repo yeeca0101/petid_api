@@ -334,6 +334,13 @@ h2 {
   letter-spacing: 0;
 }
 
+.upload-progress-detail {
+  font-size: 11px;
+  color: var(--ink);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
 .group-title-row {
   display: flex;
   align-items: center;
