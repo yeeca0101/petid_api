@@ -63,6 +63,10 @@ function hasPendingGalleryItems(items) {
   });
 }
 
+function hasPendingActiveExemplars() {
+  return hasPendingGalleryItems(state.activeExemplars);
+}
+
 function scheduleGalleryAutoRefresh() {
   clearGalleryRefreshTimer();
   if (!state.galleryAutoRefreshEnabled) return;
@@ -72,7 +76,7 @@ function scheduleGalleryAutoRefresh() {
       return;
     }
     try {
-      if (Date.now() < Number(state.galleryAutoRefreshUntil || 0)) {
+      if (Date.now() < Number(state.galleryAutoRefreshUntil || 0) || hasPendingActiveExemplars()) {
         await loadPets();
       }
       await loadGallery({ reason: "auto-refresh" });
@@ -447,7 +451,7 @@ function classifyUploadStatus(status) {
 
   if (ingestStatus === "READY" || requestStatus === "COMPLETED" || requestStatus === "SUCCEEDED" || jobStatus === "SUCCEEDED") return "completed";
   if (ingestStatus === "FAILED" || requestStatus === "FAILED" || jobStatus === "FAILED") return "failed";
-  if (jobStatus === "RUNNING" || requestStatus === "PROCESSING" || ingestStatus === "PROCESSING") return "processing";
+  if (jobStatus === "RUNNING" || jobStatus === "LEASED" || requestStatus === "PROCESSING" || ingestStatus === "PROCESSING") return "processing";
   if (jobStatus === "QUEUED" || requestStatus === "RECEIVED" || requestStatus === "QUEUED" || ingestStatus === "PENDING") return "queued";
   return "queued";
 }
@@ -1695,7 +1699,7 @@ async function loadGallery(options = {}) {
     state.selectedImageIds.clear();
     state.imageMetaCache.clear();
     state.searchScores = {};
-    state.galleryAutoRefreshEnabled = hasPendingGalleryItems(allItems) || Date.now() < Number(state.galleryAutoRefreshUntil || 0);
+    state.galleryAutoRefreshEnabled = hasPendingGalleryItems(allItems) || hasPendingActiveExemplars() || Date.now() < Number(state.galleryAutoRefreshUntil || 0);
     renderGallery();
     log("Loaded gallery", {
       view: state.galleryView,
@@ -2010,6 +2014,7 @@ async function folderUploadExemplars() {
             const itemStatus = String(item?.status || "").toLowerCase();
             if (itemStatus === "queued" && item.status_url) {
               tracker.recordQueued(item.status_url);
+              startGalleryAutoRefreshWindow();
               return;
             }
             if (itemStatus === "ok") {
@@ -2096,6 +2101,7 @@ async function dailyUploadImages() {
       tracker.markRequestResolved();
       if (data?.status_url) {
         tracker.recordQueued(data.status_url);
+        startGalleryAutoRefreshWindow();
       } else {
         tracker.recordImmediateSuccess();
       }
@@ -2110,7 +2116,6 @@ async function dailyUploadImages() {
   log("Daily upload done", { succeeded: success, failed, captured_at: capturedAt || null });
   tracker.markUploadsFinished();
   if (success > 0) {
-    startGalleryAutoRefreshWindow();
     await tracker.waitForCompletion();
     if (failed === 0) {
       clearFileInput("dFiles");
