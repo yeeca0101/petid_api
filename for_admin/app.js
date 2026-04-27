@@ -533,7 +533,7 @@ function createUploadProgressTracker(progressId, { total = 1, metaPrefix = "" } 
       `${terminal} / ${normalizedTotal} 완료`,
       currentCounts.completed > 0 ? `${currentCounts.completed} 완료됨` : "",
       currentCounts.failed > 0 ? `${currentCounts.failed} 실패` : "",
-      pollTimedOut ? "상태 확인 중" : "",
+      pollTimedOut ? "" : "",
     ].filter(Boolean);
     setUploadProgress(progressId, {
       title,
