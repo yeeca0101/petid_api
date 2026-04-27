@@ -560,10 +560,9 @@ function createUploadProgressTracker(progressId, { total = 1, metaPrefix = "" } 
         }
       }
 
-      if (Date.now() - startedAt >= UPLOAD_STATUS_POLL_TIMEOUT_MS) {
+      if (!pollTimedOut && Date.now() - startedAt >= UPLOAD_STATUS_POLL_TIMEOUT_MS) {
         pollTimedOut = true;
         render();
-        return latestStatusList;
       }
 
       render();
