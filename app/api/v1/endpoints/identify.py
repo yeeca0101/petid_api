@@ -10,7 +10,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from qdrant_client.http import models as qm
 from starlette.concurrency import run_in_threadpool
 
-from app.api.v1.endpoints.ingest import ingest as ingest_image
+from app.api.v1.endpoints.ingest import ingest_image_sync
 from app.api.v1.endpoints.pets import _read_pet_name_map
 from app.schemas.identify import IdentifyCandidate, IdentifyResponse
 from app.vector_db.qdrant_store import QdrantStore
@@ -59,7 +59,7 @@ async def identify(
     store = _get_store(request)
     _base_dt, resolved_captured_at = _resolve_captured_at(captured_at)
 
-    ingest_resp = await ingest_image(
+    ingest_resp = await ingest_image_sync(
         request=request,
         file=file,
         daycare_id=None,
@@ -87,7 +87,7 @@ async def identify(
         _exemplar_filter(species=target.species),
     )
 
-    pet_name_map = _read_pet_name_map(None)
+    pet_name_map = _read_pet_name_map()
     candidates: List[IdentifyCandidate] = []
     seen_pet_ids = set()
 

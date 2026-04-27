@@ -5,15 +5,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # https://dramatic-bargain-ireland-financing.trycloudflare.com
-API_BASE="${API_BASE:-http://localhost:8001}"
+API_BASE="${API_BASE:-http://localhost:8000}"
 IMG="${IMG:-}"
 DEFAULT_IMG="${DEFAULT_IMG:-}"
 CAPTURED_AT="${CAPTURED_AT:-}"
-TOP_K="${TOP_K:-1}"
+TOP_K="${TOP_K:-5}"
 STATE_FILE="${STATE_FILE:-${SCRIPT_DIR}/last_identify.json}"
 
 if [ -z "${DEFAULT_IMG}" ]; then
-  DEFAULT_IMG="$(find "${PROJECT_ROOT}/data/images_for_test" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) 2>/dev/null | sort | head -n 1 || true)"
+  DEFAULT_IMG="$(find "${PROJECT_ROOT}/data/dev" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) -print -quit 2>/dev/null || true)"
 fi
 
 if [ -z "${IMG}" ] && [ -f "${DEFAULT_IMG}" ]; then

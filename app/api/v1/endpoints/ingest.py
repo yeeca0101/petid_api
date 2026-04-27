@@ -180,6 +180,183 @@ def _get_store(request: Request) -> QdrantStore:
     return store
 
 
+async def ingest_image_sync(
+    *,
+    request: Request,
+    file: UploadFile,
+    daycare_id: Optional[str],
+    trainer_id: Optional[str],
+    captured_at: Optional[str],
+    image_role: Literal["DAILY", "SEED"],
+    pet_name: Optional[str],
+    include_embedding: bool = False,
+) -> IngestResponse:
+    """Run the ingest pipeline inline and return detected instances immediately."""
+    img = await load_pil_image(file, settings.max_image_bytes)
+    w, h = img.size
+
+    cap_dt = _parse_captured_at(captured_at)
+    resolved_daycare_id = (daycare_id or "").strip()
+    uploaded_at = _utcnow()
+    image_id = f"img_{uuid.uuid4().hex}"
+    raw_path, thumb_path = await _persist_uploaded_image(
+        file=file,
+        img=img,
+        image_id=image_id,
+        image_role=image_role,
+        pet_name=pet_name,
+        captured_dt=cap_dt,
+        uploaded_at=uploaded_at,
+    )
+
+    embedder = _get_embedder(request)
+    detector = _get_detector(request)
+    store = _get_store(request)
+
+    base_dir = Path(settings.reid_storage_dir)
+    meta_dir = base_dir / "meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+
+    detections = []
+    if settings.detector_enabled:
+        detections = await run_in_threadpool(detector.detect, img)
+    else:
+        detections = [
+            type("_D", (), {"class_id": 16, "confidence": 1.0, "x1": 0.0, "y1": 0.0, "x2": 1.0, "y2": 1.0})
+        ]
+
+    detections = _filter_small_detections(detections, image_role=image_role)
+    source_detections = [_detection_to_source_meta(d) for d in detections]
+    primary_source_detection_index: Optional[int] = None
+
+    if image_role == "SEED" and len(detections) > 1:
+        primary_source_detection_index = min(
+            range(len(detections)), key=lambda idx: _seed_detection_sort_key(detections[idx])
+        )
+        detections = [detections[primary_source_detection_index]]
+    elif image_role == "SEED" and len(detections) == 1:
+        primary_source_detection_index = 0
+
+    crops = []
+    inst_meta = []
+    for d in detections:
+        bb = NormalizedBBox(x1=float(d.x1), y1=float(d.y1), x2=float(d.x2), y2=float(d.y2))
+        bb = pad_bbox(bb, settings.crop_padding)
+        crop = crop_from_bbox(img, bb)
+        crops.append(crop)
+        inst_meta.append((d, bb))
+
+    embs = []
+    if crops:
+        async with embedder.semaphore:
+            embs = await run_in_threadpool(embedder.embed_pil_images, crops)
+
+    from qdrant_client.http import models as qm
+
+    points = []
+    instances_out = []
+    meta_instances = []
+    for i, (d, bb) in enumerate(inst_meta):
+        instance_uuid = str(uuid.uuid4())
+        instance_id = f"ins_{instance_uuid}"
+        emb_vec = embs[i].tolist() if len(embs) else []
+        species = _parse_species(int(d.class_id))
+        cap_ts = int((cap_dt or uploaded_at).timestamp())
+
+        payload = {
+            "daycare_id": resolved_daycare_id,
+            "trainer_id": trainer_id,
+            "image_id": image_id,
+            "image_role": image_role,
+            "pet_name": pet_name,
+            "captured_at_ts": cap_ts,
+            "species": species,
+            "class_id": int(d.class_id),
+            "det_conf": float(d.confidence),
+            "bbox": {"x1": bb.x1, "y1": bb.y1, "x2": bb.x2, "y2": bb.y2},
+            "embedding_type": "BODY",
+            "model_version": embedder.model_info.model_version,
+            "instance_id": instance_id,
+        }
+
+        points.append(qm.PointStruct(id=instance_uuid, vector=emb_vec, payload=payload))
+
+        meta_instances.append(
+            {
+                "instance_id": instance_id,
+                "class_id": int(d.class_id),
+                "species": species,
+                "confidence": float(d.confidence),
+                "bbox": {"x1": bb.x1, "y1": bb.y1, "x2": bb.x2, "y2": bb.y2},
+                "pet_id": None,
+            }
+        )
+
+        inst_out = InstanceOut(
+            instance_id=instance_id,
+            class_id=int(d.class_id),
+            species=species,
+            confidence=float(d.confidence),
+            bbox=BBox(x1=bb.x1, y1=bb.y1, x2=bb.x2, y2=bb.y2),
+            embedding=emb_vec if include_embedding else None,
+            embedding_meta=(
+                EmbeddingMeta(
+                    embedding_type="BODY",
+                    dim=int(len(emb_vec)),
+                    dtype="float32",
+                    l2_normalized=True,
+                    model_version=embedder.model_info.model_version,
+                )
+                if emb_vec
+                else None
+            ),
+        )
+        instances_out.append(inst_out)
+
+    await run_in_threadpool(store.upsert, points)
+
+    cap_ts = int((cap_dt or uploaded_at).timestamp())
+    meta = {
+        "image": {
+            "image_id": image_id,
+            "daycare_id": resolved_daycare_id,
+            "image_role": image_role,
+            "pet_name": pet_name,
+            "trainer_id": trainer_id,
+            "captured_at": (cap_dt.isoformat() if cap_dt else None),
+            "uploaded_at": uploaded_at.isoformat(),
+            "original_filename": (file.filename or None),
+            "captured_at_ts": cap_ts,
+            "uploaded_at_ts": int(uploaded_at.timestamp()),
+            "width": w,
+            "height": h,
+            "raw_path": str(raw_path),
+            "thumb_path": str(thumb_path),
+            "raw_url": f"{settings.api_prefix}/images/{image_id}?variant=raw",
+            "thumb_url": f"{settings.api_prefix}/images/{image_id}?variant=thumb",
+            "instance_count": len(meta_instances),
+            "pipeline_version": "yolo26x+miewidv3+poc",
+        },
+        "instances": meta_instances,
+        "source_detections": source_detections if image_role == "SEED" else None,
+        "primary_source_detection_index": primary_source_detection_index if image_role == "SEED" else None,
+    }
+    (meta_dir / f"{image_id}.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
+    return IngestResponse(
+        image=ImageMeta(
+            image_id=image_id,
+            image_role=image_role,
+            captured_at=cap_dt,
+            uploaded_at=uploaded_at,
+            width=w,
+            height=h,
+            storage_path=str(raw_path),
+        ),
+        instances=instances_out,
+    )
+
+
 @router.post("/ingest", response_model=IngestResponse | IngestAcceptedResponse)
 async def ingest(
     request: Request,
