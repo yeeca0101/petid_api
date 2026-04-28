@@ -19,6 +19,8 @@ from app.ml.detector import YoloDetector
 from app.ml.embedder import Embedder
 from app.utils.timezone import business_tz
 from app.vector_db.qdrant_store import QdrantStore
+from app.worker.batch_types import BatchJobRecord
+from app.worker.queue import BatchJobFailure, ClaimedJob
 from app.worker.scheduler import SchedulerTask, SingleLaneScheduler
 
 logger = logging.getLogger(__name__)
@@ -96,6 +98,9 @@ class ProbeResources:
     settings: Settings
     embedder: Embedder
     detector: Optional[YoloDetector]
+
+
+BatchIngestOutcome = dict[str, Any] | BatchJobFailure
 
 
 def _build_embedder(settings: Settings, *, profile_name: str) -> Embedder:
@@ -311,6 +316,260 @@ def execute_ingest_pipeline(
                 payload={"image_id": image_id, "error": str(exc)},
             )
         raise
+
+
+def execute_ingest_pipeline_batch(
+    *,
+    db: DatabaseManager,
+    scheduler: SingleLaneScheduler,
+    resources: WorkerResources,
+    claims: list[ClaimedJob],
+) -> dict[uuid.UUID, BatchIngestOutcome]:
+    if not claims:
+        return {}
+
+    outcomes: dict[uuid.UUID, BatchIngestOutcome] = {}
+    batch_records: list[BatchJobRecord] = []
+
+    for batch_index, claim in enumerate(claims):
+        payload = claim.payload
+        image_id = str(payload.get("image_id") or "")
+        request_id = _request_id_from_payload(payload)
+        try:
+            if not image_id:
+                raise ValueError("image_id missing from ingest job payload")
+            with db.session_scope() as session:
+                repo = ReIdRepository(session)
+                image = repo.get_image(image_id)
+                if image is None:
+                    raise LookupError(f"image not found for ingest pipeline: {image_id}")
+                repo.update_image_status(image_id, ingest_status="PROCESSING", pipeline_stage="WAITING_FOR_SCHEDULER")
+                if request_id is not None:
+                    repo.update_ingest_request_status(request_id, status="PROCESSING", image_id=image_id)
+                repo.append_job_event(
+                    job_id=claim.job_id,
+                    event_type="IMAGE_WAITING_FOR_SCHEDULER",
+                    payload={"image_id": image_id, "batch_index": batch_index},
+                )
+                raw_path = image.raw_path
+
+            pil_image = _load_pil_image_from_path(raw_path)
+            batch_records.append(
+                BatchJobRecord(
+                    batch_index=batch_index,
+                    job_id=claim.job_id,
+                    image_id=image_id,
+                    request_id=request_id,
+                    image_role=str(payload.get("image_role") or "DAILY").upper(),
+                    payload=payload,
+                    raw_path=raw_path,
+                    pil_image=pil_image,
+                    width=pil_image.size[0],
+                    height=pil_image.size[1],
+                )
+            )
+        except Exception as exc:
+            _mark_ingest_image_failed(
+                db=db,
+                job_id=claim.job_id,
+                image_id=image_id,
+                request_id=request_id,
+                error_code="INGEST_PIPELINE_PREFLIGHT_ERROR",
+                error_message=str(exc),
+            )
+            outcomes[claim.job_id] = BatchJobFailure(
+                error_code="INGEST_PIPELINE_PREFLIGHT_ERROR",
+                error_message=str(exc),
+            )
+
+    if not batch_records:
+        return outcomes
+
+    try:
+        processed_by_job_id = scheduler.submit(
+            SchedulerTask(
+                job_id=batch_records[0].job_id,
+                job_type="INGEST_PIPELINE_BATCH",
+                payload={
+                    "job_ids": [str(record.job_id) for record in batch_records],
+                    "image_ids": [record.image_id for record in batch_records],
+                },
+                fn=lambda: _run_gpu_ingest_batch_steps(
+                    db=db,
+                    resources=resources,
+                    batch_records=batch_records,
+                ),
+            )
+        )
+    except Exception as exc:
+        for record in batch_records:
+            _mark_ingest_image_failed(
+                db=db,
+                job_id=record.job_id,
+                image_id=record.image_id,
+                request_id=record.request_id,
+                error_code="INGEST_PIPELINE_BATCH_ERROR",
+                error_message=str(exc),
+            )
+            outcomes[record.job_id] = BatchJobFailure(
+                error_code="INGEST_PIPELINE_BATCH_ERROR",
+                error_message=str(exc),
+            )
+        return outcomes
+
+    all_points: list[qm.PointStruct] = []
+    for record in batch_records:
+        processed = processed_by_job_id[record.job_id]
+        with db.session_scope() as session:
+            repo = ReIdRepository(session)
+            repo.update_image_status(
+                record.image_id,
+                pipeline_stage="UPSERTING_VECTOR",
+                source_detection_count=processed["source_detection_count"],
+                primary_source_detection_index=processed["primary_source_detection_index"],
+            )
+            repo.append_job_event(
+                job_id=record.job_id,
+                event_type="IMAGE_UPSERTING_VECTOR",
+                payload={
+                    "image_id": record.image_id,
+                    "instance_count": len(processed["instances"]),
+                    "batch_index": record.batch_index,
+                },
+            )
+        all_points.extend(processed["points"])
+
+    try:
+        if all_points:
+            resources.store.upsert(all_points)
+    except Exception as exc:
+        for record in batch_records:
+            _mark_ingest_image_failed(
+                db=db,
+                job_id=record.job_id,
+                image_id=record.image_id,
+                request_id=record.request_id,
+                error_code="INGEST_PIPELINE_UPSERT_ERROR",
+                error_message=str(exc),
+            )
+            outcomes[record.job_id] = BatchJobFailure(
+                error_code="INGEST_PIPELINE_UPSERT_ERROR",
+                error_message=str(exc),
+            )
+        return outcomes
+
+    for record in batch_records:
+        processed = processed_by_job_id[record.job_id]
+        instance_rows = _processed_instance_rows(processed)
+        with db.session_scope() as session:
+            repo = ReIdRepository(session)
+            repo.replace_instances_for_image(record.image_id, instances=instance_rows)
+            repo.update_image_status(
+                record.image_id,
+                ingest_status="READY",
+                pipeline_stage="READY",
+                source_detection_count=processed["source_detection_count"],
+                primary_source_detection_index=processed["primary_source_detection_index"],
+            )
+            if record.request_id is not None:
+                repo.update_ingest_request_status(record.request_id, status="SUCCEEDED", image_id=record.image_id)
+            repo.append_job_event(
+                job_id=record.job_id,
+                event_type="IMAGE_READY",
+                payload={
+                    "image_id": record.image_id,
+                    "instance_count": len(instance_rows),
+                    "batch_index": record.batch_index,
+                },
+            )
+
+        _write_meta_sidecar(
+            settings=resources.settings,
+            image_id=record.image_id,
+            payload=record.payload,
+            processed=processed,
+            pil_image=record.pil_image,
+            raw_path=record.raw_path,
+        )
+        outcomes[record.job_id] = {
+            "image_id": record.image_id,
+            "instance_count": len(instance_rows),
+            "pipeline_stage": "READY",
+        }
+
+    return outcomes
+
+
+def _request_id_from_payload(payload: dict[str, Any]) -> uuid.UUID | None:
+    request_id_raw = payload.get("request_id")
+    return uuid.UUID(str(request_id_raw)) if request_id_raw else None
+
+
+def _processed_instance_rows(processed: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "instance_id": item["instance_id"],
+            "species": item["species"],
+            "class_id": item["class_id"],
+            "det_conf": item["confidence"],
+            "bbox_x1": item["bbox"]["x1"],
+            "bbox_y1": item["bbox"]["y1"],
+            "bbox_x2": item["bbox"]["x2"],
+            "bbox_y2": item["bbox"]["y2"],
+            "qdrant_point_id": item["instance_id"],
+            "vector_status": "READY",
+            "embedding_type": "BODY",
+            "model_version": processed["model_version"],
+        }
+        for item in processed["instances"]
+    ]
+
+
+def _mark_ingest_image_failed(
+    *,
+    db: DatabaseManager,
+    job_id: uuid.UUID,
+    image_id: str,
+    request_id: uuid.UUID | None,
+    error_code: str,
+    error_message: str,
+) -> None:
+    with db.session_scope() as session:
+        repo = ReIdRepository(session)
+        if image_id:
+            repo.update_image_status(
+                image_id,
+                ingest_status="FAILED",
+                pipeline_stage="FAILED",
+                last_error_code=error_code,
+                last_error_message=error_message,
+            )
+        if request_id is not None:
+            repo.update_ingest_request_status(request_id, status="FAILED", image_id=image_id or None)
+        repo.append_job_event(
+            job_id=job_id,
+            event_type="IMAGE_FAILED",
+            payload={"image_id": image_id or None, "error_code": error_code, "error": error_message},
+        )
+
+
+def _run_gpu_ingest_batch_steps(
+    *,
+    db: DatabaseManager,
+    resources: WorkerResources,
+    batch_records: list[BatchJobRecord],
+) -> dict[uuid.UUID, dict[str, Any]]:
+    processed_by_job_id: dict[uuid.UUID, dict[str, Any]] = {}
+    for record in batch_records:
+        processed_by_job_id[record.job_id] = _run_gpu_ingest_steps(
+            db=db,
+            resources=resources,
+            job_id=record.job_id,
+            image_id=record.image_id,
+            pil_image=record.pil_image,
+            payload=record.payload,
+        )
+    return processed_by_job_id
 
 
 def _run_gpu_ingest_steps(

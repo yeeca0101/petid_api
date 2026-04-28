@@ -9,7 +9,7 @@ from app.core.config import settings
 from app.core.logging import setup_logging
 from app.db.session import DatabaseManager
 from app.worker.active_jobs import ActiveJobRegistry
-from app.worker.pipeline import execute_ingest_pipeline
+from app.worker.pipeline import execute_ingest_pipeline, execute_ingest_pipeline_batch
 from app.worker.queue import ClaimedJob, QueueWorker, QueueWorkerConfig, build_default_worker_id
 from app.worker.scheduler import SingleLaneScheduler, build_v1_scheduler
 from app.worker.slots import IngestPipelineSlot, build_ingest_pipeline_slot, build_ingest_pipeline_slots
@@ -47,6 +47,14 @@ def _build_slot_worker(
             payload=payload,
         )
     }
+    batch_handlers = {
+        "INGEST_PIPELINE": lambda *, claims: execute_ingest_pipeline_batch(
+            db=db,
+            scheduler=scheduler,
+            resources=slot.resources,
+            claims=claims,
+        )
+    }
     return QueueWorker(
         db=db,
         config=QueueWorkerConfig(
@@ -56,6 +64,7 @@ def _build_slot_worker(
             heartbeat_interval_s=_heartbeat_interval_s(),
         ),
         handlers=handlers,
+        batch_handlers=batch_handlers,
     )
 
 
@@ -84,7 +93,22 @@ def _run_single_slot(*, db: DatabaseManager, base_worker_id: str) -> int:
 
     worker = _build_slot_worker(db=db, slot=slot, scheduler=scheduler)
     try:
-        worker.run_forever()
+        if settings.ingest_batch_pipeline_enabled:
+            logger.info(
+                "Batch ingest worker loop enabled | job_batch_size=%s | max_wait_ms=%s",
+                settings.ingest_job_batch_size,
+                settings.ingest_job_batch_max_wait_ms,
+            )
+            while True:
+                result = worker.run_once_batch(
+                    job_type="INGEST_PIPELINE",
+                    limit=settings.ingest_job_batch_size,
+                    max_wait_s=settings.ingest_job_batch_max_wait_ms / 1000.0,
+                )
+                if not result.handled_job:
+                    time.sleep(worker.config.poll_interval_s)
+        else:
+            worker.run_forever()
     finally:
         scheduler.stop()
     return 0
