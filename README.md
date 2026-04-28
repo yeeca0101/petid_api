@@ -138,6 +138,48 @@ Operational meaning:
 - Each slot owns its own detector/embedder/resource bundle.
 - The coordinator claims jobs only when there is free in-process capacity.
 
+### Ingest Batch Pipeline Runtime
+The queue worker can batch queued ingest jobs before entering the model pipeline.
+
+Runtime modes:
+
+```env
+INGEST_BATCH_PIPELINE_MODE=single
+```
+
+- `single`: existing one-image job execution.
+- `batch_embed_only`: claims image jobs in batches and batches crop embedding, but keeps detector calls per image.
+- `batch_full`: batches queue jobs, detector images, and crop embedding.
+
+Conservative local starting point:
+
+```env
+ENABLE_POSTGRES_QUEUE=true
+INGEST_PIPELINE_SLOTS=1
+INGEST_BATCH_PIPELINE_MODE=batch_full
+INGEST_JOB_BATCH_SIZE=8
+INGEST_JOB_BATCH_MAX_WAIT_MS=100
+DETECTOR_BATCH_SIZE=8
+EMBEDDER_CROP_BATCH_SIZE=32
+```
+
+Backpressure rule of thumb:
+
+```text
+effective images in GPU path = INGEST_PIPELINE_SLOTS * INGEST_JOB_BATCH_SIZE
+```
+
+For example, `INGEST_PIPELINE_SLOTS=1` and `INGEST_JOB_BATCH_SIZE=8` means at most one 8-image model batch is in the GPU path. If each image produces 8 crops on average, the embedder may see 64 crops, which are chunked by `EMBEDDER_CROP_BATCH_SIZE`.
+
+Rollback:
+
+```env
+INGEST_BATCH_PIPELINE_MODE=single
+INGEST_BATCH_PIPELINE_ENABLED=false
+```
+
+Use `/v1/admin/queue/summary` to verify the active mode and configured batch sizes.
+
 ### Dev Validation Note
 Confirmed on 2026-04-22:
 - `docker compose -f compose.dev.yml up -d` was used with 2-slot settings and the dev stack started successfully.
