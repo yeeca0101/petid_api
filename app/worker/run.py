@@ -21,8 +21,9 @@ def _heartbeat_interval_s() -> float:
     return max(1.0, min(settings.queue_lease_timeout_s / 3.0, 10.0))
 
 
-def _ingest_batch_pipeline_enabled() -> bool:
-    return bool(settings.ingest_batch_pipeline_enabled or settings.ingest_batch_pipeline_mode != "single")
+def _use_batch_ingest_pipeline() -> bool:
+    return settings.ingest_batch_pipeline_mode != "single"
+
 
 
 def _build_scheduler() -> SingleLaneScheduler:
@@ -97,7 +98,7 @@ def _run_single_slot(*, db: DatabaseManager, base_worker_id: str) -> int:
 
     worker = _build_slot_worker(db=db, slot=slot, scheduler=scheduler)
     try:
-        if _ingest_batch_pipeline_enabled():
+        if _use_batch_ingest_pipeline():
             logger.info(
                 "Batch ingest worker loop enabled | mode=%s | job_batch_size=%s | max_wait_ms=%s | detector_batch_size=%s | embedder_crop_batch_size=%s",
                 settings.ingest_batch_pipeline_mode,

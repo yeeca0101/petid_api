@@ -30,6 +30,16 @@ class SlotRecommendation:
 
 
 @dataclass(frozen=True)
+class BatchPipelineRecommendation:
+    mode: str
+    job_batch_size: int
+    detector_batch_size: int
+    embedder_crop_batch_size: int
+    effective_images_in_gpu_path: int
+    estimated_crops_per_job_batch: int | None
+
+
+@dataclass(frozen=True)
 class RecommendationConfig:
     safety_vram_gb: float
     safety_ram_gb: float
@@ -99,6 +109,24 @@ def _build_parser() -> argparse.ArgumentParser:
         default="DAILY",
         choices=("DAILY", "SEED"),
         help="Image role used for runtime probe behavior. Default: DAILY",
+    )
+    parser.add_argument(
+        "--job-batch-size",
+        type=int,
+        default=8,
+        help="Candidate INGEST_JOB_BATCH_SIZE to include in batch recommendations. Default: 8",
+    )
+    parser.add_argument(
+        "--detector-batch-size",
+        type=int,
+        default=8,
+        help="Candidate DETECTOR_BATCH_SIZE to include in batch recommendations. Default: 8",
+    )
+    parser.add_argument(
+        "--embedder-crop-batch-size",
+        type=int,
+        default=32,
+        help="Candidate EMBEDDER_CROP_BATCH_SIZE to include in batch recommendations. Default: 32",
     )
     return parser
 
@@ -206,6 +234,30 @@ def recommend_slots(
         vram_limited_slots=vram_limited_slots,
         usable_ram_gb=usable_ram_gb,
         usable_vram_gb=usable_vram_gb,
+    )
+
+
+def recommend_batch_pipeline(
+    *,
+    recommended_slots: int,
+    job_batch_size: int,
+    detector_batch_size: int,
+    embedder_crop_batch_size: int,
+    runtime_probe: RuntimeProbeUsage | None,
+) -> BatchPipelineRecommendation:
+    safe_job_batch_size = max(1, int(job_batch_size))
+    safe_detector_batch_size = max(1, min(int(detector_batch_size), safe_job_batch_size))
+    safe_embedder_crop_batch_size = max(1, int(embedder_crop_batch_size))
+    estimated_crops_per_job_batch = None
+    if runtime_probe is not None:
+        estimated_crops_per_job_batch = safe_job_batch_size * max(0, int(runtime_probe.cropped_instances))
+    return BatchPipelineRecommendation(
+        mode="batch_full",
+        job_batch_size=safe_job_batch_size,
+        detector_batch_size=safe_detector_batch_size,
+        embedder_crop_batch_size=safe_embedder_crop_batch_size,
+        effective_images_in_gpu_path=max(1, int(recommended_slots)) * safe_job_batch_size,
+        estimated_crops_per_job_batch=estimated_crops_per_job_batch,
     )
 
 
@@ -367,6 +419,13 @@ def main() -> int:
         minimum=max(1, args.min_slots),
         maximum=max(1, args.max_slots),
     )
+    batch_recommendation = recommend_batch_pipeline(
+        recommended_slots=recommendation.recommended_slots,
+        job_batch_size=args.job_batch_size,
+        detector_batch_size=args.detector_batch_size,
+        embedder_crop_batch_size=args.embedder_crop_batch_size,
+        runtime_probe=runtime_probe,
+    )
 
     print("Ingest Slot Recommendation")
     print(f"- detected_total_ram: {_format_gb(capacity.total_ram_gb)}")
@@ -398,6 +457,21 @@ def main() -> int:
     print(f"- ram_limited_slots: {recommendation.ram_limited_slots if recommendation.ram_limited_slots is not None else 'unknown'}")
     print(f"- vram_limited_slots: {recommendation.vram_limited_slots if recommendation.vram_limited_slots is not None else 'unknown'}")
     print(f"- recommended_ingest_pipeline_slots: {recommendation.recommended_slots}")
+    print(f"- recommended_ingest_batch_pipeline_mode: {batch_recommendation.mode}")
+    print(f"- recommended_ingest_job_batch_size: {batch_recommendation.job_batch_size}")
+    print(f"- recommended_detector_batch_size: {batch_recommendation.detector_batch_size}")
+    print(f"- recommended_embedder_crop_batch_size: {batch_recommendation.embedder_crop_batch_size}")
+    print(f"- recommended_effective_images_in_gpu_path: {batch_recommendation.effective_images_in_gpu_path}")
+    print(
+        "- estimated_crops_per_job_batch: "
+        f"{batch_recommendation.estimated_crops_per_job_batch if batch_recommendation.estimated_crops_per_job_batch is not None else 'unknown'}"
+    )
+    print("Suggested env:")
+    print(f"INGEST_PIPELINE_SLOTS={recommendation.recommended_slots}")
+    print(f"INGEST_BATCH_PIPELINE_MODE={batch_recommendation.mode}")
+    print(f"INGEST_JOB_BATCH_SIZE={batch_recommendation.job_batch_size}")
+    print(f"DETECTOR_BATCH_SIZE={batch_recommendation.detector_batch_size}")
+    print(f"EMBEDDER_CROP_BATCH_SIZE={batch_recommendation.embedder_crop_batch_size}")
     if config.probe_image is not None:
         print(f"- configured_probe_image: {config.probe_image}")
         print(

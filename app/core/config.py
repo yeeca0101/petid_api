@@ -275,10 +275,6 @@ class Settings(BaseSettings):
         default=None,
         description="Optional probe image path for ingest slot sizing/profiling tooling.",
     )
-    ingest_batch_pipeline_enabled: bool = Field(
-        default=False,
-        description="Legacy boolean to enable the queue worker's batch ingest pipeline path.",
-    )
     ingest_batch_pipeline_mode: Literal["single", "batch_embed_only", "batch_full"] = Field(
         default="single",
         description=(

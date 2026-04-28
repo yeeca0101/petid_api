@@ -147,9 +147,9 @@ Runtime modes:
 INGEST_BATCH_PIPELINE_MODE=single
 ```
 
-- `single`: existing one-image job execution.
-- `batch_embed_only`: claims image jobs in batches and batches crop embedding, but keeps detector calls per image.
-- `batch_full`: batches queue jobs, detector images, and crop embedding.
+- `single`: legacy-safe mode. Process one image job at a time through detector and embedder.
+- `batch_embed_only`: collect multiple image jobs, but still run detector one image at a time. Cropped instances are flattened and embedded in crop batches.
+- `batch_full`: collect multiple image jobs, run detector with image batches, then flatten cropped instances and run embedder crop batches.
 
 Conservative local starting point:
 
@@ -175,7 +175,6 @@ Rollback:
 
 ```env
 INGEST_BATCH_PIPELINE_MODE=single
-INGEST_BATCH_PIPELINE_ENABLED=false
 ```
 
 Use `/v1/admin/queue/summary` to verify the active mode and configured batch sizes.

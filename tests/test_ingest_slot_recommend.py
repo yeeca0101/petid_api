@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.tools.ingest_slot_recommend import CapacitySnapshot, recommend_slots
+from app.tools.ingest_slot_recommend import CapacitySnapshot, RuntimeProbeUsage, recommend_batch_pipeline, recommend_slots
 
 
 class IngestSlotRecommendTest(unittest.TestCase):
@@ -33,6 +33,39 @@ class IngestSlotRecommendTest(unittest.TestCase):
         self.assertEqual(recommendation.ram_limited_slots, 3)
         self.assertIsNone(recommendation.vram_limited_slots)
         self.assertEqual(recommendation.recommended_slots, 3)
+
+    def test_batch_pipeline_recommendation_reports_new_settings(self) -> None:
+        runtime_probe = RuntimeProbeUsage(
+            measured_per_slot_ram_gb=4.0,
+            measured_per_slot_vram_gb=5.0,
+            build_peak_ram_delta_gb=1.0,
+            build_peak_vram_delta_gb=2.0,
+            probe_peak_ram_delta_gb=3.0,
+            probe_peak_vram_delta_gb=3.0,
+            detected_instances=9,
+            cropped_instances=8,
+            embedded_instances=8,
+            embedding_dim=512,
+            model_version="test",
+            image_width=640,
+            image_height=480,
+            image_role="DAILY",
+        )
+
+        recommendation = recommend_batch_pipeline(
+            recommended_slots=2,
+            job_batch_size=8,
+            detector_batch_size=16,
+            embedder_crop_batch_size=32,
+            runtime_probe=runtime_probe,
+        )
+
+        self.assertEqual(recommendation.mode, "batch_full")
+        self.assertEqual(recommendation.job_batch_size, 8)
+        self.assertEqual(recommendation.detector_batch_size, 8)
+        self.assertEqual(recommendation.embedder_crop_batch_size, 32)
+        self.assertEqual(recommendation.effective_images_in_gpu_path, 16)
+        self.assertEqual(recommendation.estimated_crops_per_job_batch, 64)
 
 
 if __name__ == "__main__":

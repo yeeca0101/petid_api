@@ -39,7 +39,6 @@ class AdminQueueSummaryBatchConfigTest(unittest.TestCase):
             queue_local_capacity=8,
             scheduler_max_inflight_jobs=1,
             scheduler_enable_micro_batching=False,
-            ingest_batch_pipeline_enabled=False,
             ingest_batch_pipeline_mode="batch_full",
             ingest_pipeline_slots=2,
             ingest_pipeline_local_queue_capacity=4,
@@ -56,7 +55,6 @@ class AdminQueueSummaryBatchConfigTest(unittest.TestCase):
         ):
             result = asyncio.run(queue_summary(request))
 
-        self.assertTrue(result["ingest_batch_pipeline_enabled"])
         self.assertEqual(result["ingest_batch_pipeline_mode"], "batch_full")
         self.assertEqual(result["ingest_job_batch_size"], 8)
         self.assertEqual(result["detector_batch_size"], 8)
