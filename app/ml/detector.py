@@ -74,14 +74,17 @@ class YoloDetector:
         return device_str
 
     def detect(self, image: Image.Image) -> List[DetectedInstance]:
-        if image.mode != "RGB":
-            image = image.convert("RGB")
+        return self.detect_batch([image])[0]
 
-        w, h = image.size
-        img = np.asarray(image)
-        # Ultralytics handles numpy RGB fine
+    def detect_batch(self, images: List[Image.Image]) -> List[List[DetectedInstance]]:
+        if not images:
+            return []
+
+        rgb_images = [image.convert("RGB") if image.mode != "RGB" else image for image in images]
+        sizes = [image.size for image in rgb_images]
+        sources = [np.asarray(image) for image in rgb_images]
         results = self.model.predict(
-            source=img,
+            source=sources,
             imgsz=self.imgsz,
             conf=self.conf,
             iou=self.iou,
@@ -89,25 +92,27 @@ class YoloDetector:
             classes=self.keep_class_ids,
             verbose=False,
         )
+        if len(results) != len(rgb_images):
+            raise RuntimeError(f"Detector returned {len(results)} results for {len(rgb_images)} images")
 
-        if not results:
-            return []
-        r0 = results[0]
-        if r0.boxes is None or len(r0.boxes) == 0:
+        return [self._detections_from_result(result, width=w, height=h) for result, (w, h) in zip(results, sizes)]
+
+    @staticmethod
+    def _detections_from_result(result, *, width: int, height: int) -> List[DetectedInstance]:
+        if result.boxes is None or len(result.boxes) == 0:
             return []
 
-        boxes = r0.boxes
+        boxes = result.boxes
         xyxy = boxes.xyxy.cpu().numpy()  # (N,4)
         confs = boxes.conf.cpu().numpy().astype(float)
         clss = boxes.cls.cpu().numpy().astype(int)
 
         out: List[DetectedInstance] = []
         for (x1, y1, x2, y2), c, cid in zip(xyxy, confs, clss):
-            # Normalize and clamp
-            nx1 = float(max(0.0, min(1.0, x1 / w)))
-            ny1 = float(max(0.0, min(1.0, y1 / h)))
-            nx2 = float(max(0.0, min(1.0, x2 / w)))
-            ny2 = float(max(0.0, min(1.0, y2 / h)))
+            nx1 = float(max(0.0, min(1.0, x1 / width)))
+            ny1 = float(max(0.0, min(1.0, y1 / height)))
+            nx2 = float(max(0.0, min(1.0, x2 / width)))
+            ny2 = float(max(0.0, min(1.0, y2 / height)))
 
             if nx2 <= nx1 or ny2 <= ny1:
                 continue

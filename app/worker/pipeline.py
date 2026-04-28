@@ -15,11 +15,11 @@ from app.core.config import Settings
 from app.db.repositories import ReIdRepository
 from app.db.session import DatabaseManager
 from app.ml.cropper import NormalizedBBox, crop_from_bbox, pad_bbox
-from app.ml.detector import YoloDetector
+from app.ml.detector import DetectedInstance, YoloDetector
 from app.ml.embedder import Embedder
 from app.utils.timezone import business_tz
 from app.vector_db.qdrant_store import QdrantStore
-from app.worker.batch_types import BatchJobRecord
+from app.worker.batch_types import BatchJobRecord, iter_chunks
 from app.worker.queue import BatchJobFailure, ClaimedJob
 from app.worker.scheduler import SchedulerTask, SingleLaneScheduler
 
@@ -559,6 +559,7 @@ def _run_gpu_ingest_batch_steps(
     resources: WorkerResources,
     batch_records: list[BatchJobRecord],
 ) -> dict[uuid.UUID, dict[str, Any]]:
+    detections_by_job_id = _detect_batch_for_records(resources=resources, batch_records=batch_records)
     processed_by_job_id: dict[uuid.UUID, dict[str, Any]] = {}
     for record in batch_records:
         processed_by_job_id[record.job_id] = _run_gpu_ingest_steps(
@@ -568,8 +569,40 @@ def _run_gpu_ingest_batch_steps(
             image_id=record.image_id,
             pil_image=record.pil_image,
             payload=record.payload,
+            precomputed_detections=detections_by_job_id[record.job_id],
         )
     return processed_by_job_id
+
+
+def _fallback_detection() -> DetectedInstance:
+    return DetectedInstance(class_id=16, confidence=1.0, x1=0.0, y1=0.0, x2=1.0, y2=1.0)
+
+
+def _detect_batch_for_records(
+    *,
+    resources: WorkerResources,
+    batch_records: list[BatchJobRecord],
+) -> dict[uuid.UUID, list[DetectedInstance]]:
+    if not batch_records:
+        return {}
+
+    if resources.detector is None:
+        return {record.job_id: [_fallback_detection()] for record in batch_records}
+
+    batch_size = max(1, int(getattr(resources.settings, "detector_batch_size", 1)))
+    detections_by_job_id: dict[uuid.UUID, list[DetectedInstance]] = {}
+    for chunk in iter_chunks(batch_records, batch_size):
+        records = list(chunk)
+        images = [record.pil_image for record in records]
+        if hasattr(resources.detector, "detect_batch"):
+            detected_groups = resources.detector.detect_batch(images)
+        else:
+            detected_groups = [resources.detector.detect(image) for image in images]
+        if len(detected_groups) != len(records):
+            raise RuntimeError(f"Detector returned {len(detected_groups)} results for {len(records)} images")
+        for record, detections in zip(records, detected_groups, strict=True):
+            detections_by_job_id[record.job_id] = list(detections)
+    return detections_by_job_id
 
 
 def _run_gpu_ingest_steps(
@@ -580,6 +613,7 @@ def _run_gpu_ingest_steps(
     image_id: str,
     pil_image: Image.Image,
     payload: dict[str, Any],
+    precomputed_detections: list[DetectedInstance] | None = None,
 ) -> dict[str, Any]:
     settings = resources.settings
     image_role = str(payload.get("image_role") or "DAILY").upper()
@@ -597,12 +631,12 @@ def _run_gpu_ingest_steps(
         repo.update_image_status(image_id, pipeline_stage="DETECTING")
         repo.append_job_event(job_id=job_id, event_type="IMAGE_DETECTING", payload={"image_id": image_id})
 
-    if resources.detector is not None:
+    if precomputed_detections is not None:
+        detections = list(precomputed_detections)
+    elif resources.detector is not None:
         detections = resources.detector.detect(pil_image)
     else:
-        detections = [
-            type("_D", (), {"class_id": 16, "confidence": 1.0, "x1": 0.0, "y1": 0.0, "x2": 1.0, "y2": 1.0})
-        ]
+        detections = [_fallback_detection()]
 
     detections = _filter_small_detections(settings, detections, image_role=image_role)
     source_detections = [_detection_to_source_meta(settings, d) for d in detections]
