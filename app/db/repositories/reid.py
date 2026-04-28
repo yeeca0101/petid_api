@@ -406,6 +406,43 @@ class ReIdRepository:
         self.session.flush()
         return record
 
+    def claim_next_jobs(
+        self,
+        *,
+        worker_id: str,
+        job_type: str,
+        limit: int,
+        now: Optional[datetime] = None,
+    ) -> list[JobRecord]:
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+
+        current_time = now or _utcnow()
+        stmt = (
+            select(JobRecord)
+            .where(
+                JobRecord.status == "QUEUED",
+                JobRecord.available_at <= current_time,
+                JobRecord.job_type == job_type,
+            )
+            .order_by(
+                JobRecord.priority.asc(),
+                JobRecord.available_at.asc(),
+                JobRecord.created_at.asc(),
+            )
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+
+        records = list(self.session.execute(stmt).scalars())
+        for record in records:
+            record.status = "LEASED"
+            record.locked_by = worker_id
+            record.locked_at = current_time
+            record.heartbeat_at = current_time
+        self.session.flush()
+        return records
+
     def requeue_stale_jobs(
         self,
         *,

@@ -275,6 +275,34 @@ class Settings(BaseSettings):
         default=None,
         description="Optional probe image path for ingest slot sizing/profiling tooling.",
     )
+    ingest_batch_pipeline_enabled: bool = Field(
+        default=False,
+        description="Enable the queue worker's batch ingest pipeline path.",
+    )
+    ingest_job_batch_size: int = Field(
+        default=8,
+        ge=1,
+        le=512,
+        description="Max image jobs to collect into one ingest model batch.",
+    )
+    ingest_job_batch_max_wait_ms: int = Field(
+        default=100,
+        ge=0,
+        le=60000,
+        description="Max wait time to collect a partial ingest job batch in milliseconds.",
+    )
+    detector_batch_size: int = Field(
+        default=8,
+        ge=1,
+        le=128,
+        description="Max images to pass to the detector in one batch call.",
+    )
+    embedder_crop_batch_size: int = Field(
+        default=32,
+        ge=1,
+        le=1024,
+        description="Max cropped instances to pass to the embedder in one batch call.",
+    )
     queue_local_capacity: int = Field(
         default=8,
         ge=1,
