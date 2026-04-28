@@ -19,7 +19,15 @@ from app.ml.detector import DetectedInstance, YoloDetector
 from app.ml.embedder import Embedder
 from app.utils.timezone import business_tz
 from app.vector_db.qdrant_store import QdrantStore
-from app.worker.batch_types import BatchJobRecord, iter_chunks
+from app.worker.batch_types import (
+    BatchCropRecord,
+    BatchEmbeddingRecord,
+    BatchJobRecord,
+    group_crop_records_by_batch_index,
+    iter_chunks,
+    validate_crop_indexes,
+    validate_embedding_records,
+)
 from app.worker.queue import BatchJobFailure, ClaimedJob
 from app.worker.scheduler import SchedulerTask, SingleLaneScheduler
 
@@ -559,19 +567,247 @@ def _run_gpu_ingest_batch_steps(
     resources: WorkerResources,
     batch_records: list[BatchJobRecord],
 ) -> dict[uuid.UUID, dict[str, Any]]:
+    settings = resources.settings
+    _mark_batch_stage(db=db, batch_records=batch_records, pipeline_stage="DETECTING", event_type="IMAGE_DETECTING")
     detections_by_job_id = _detect_batch_for_records(resources=resources, batch_records=batch_records)
+
+    prepared_by_job_id: dict[uuid.UUID, dict[str, Any]] = {}
+    selected_by_job_id: dict[uuid.UUID, list[tuple[int, DetectedInstance]]] = {}
+    for record in batch_records:
+        detections = _filter_small_detections(
+            settings,
+            detections_by_job_id[record.job_id],
+            image_role=record.image_role,
+        )
+        source_detections = [_detection_to_source_meta(settings, d) for d in detections]
+        primary_source_detection_index: Optional[int] = None
+        selected_pairs = list(enumerate(detections))
+        if record.image_role == "SEED" and len(detections) > 1:
+            primary_source_detection_index = min(
+                range(len(detections)), key=lambda idx: _seed_detection_sort_key(detections[idx])
+            )
+            selected_pairs = [(primary_source_detection_index, detections[primary_source_detection_index])]
+        elif record.image_role == "SEED" and len(detections) == 1:
+            primary_source_detection_index = 0
+        prepared_by_job_id[record.job_id] = {
+            "source_detections": source_detections,
+            "source_detection_count": len(source_detections),
+            "primary_source_detection_index": primary_source_detection_index,
+        }
+        selected_by_job_id[record.job_id] = selected_pairs
+
+    _mark_batch_stage(db=db, batch_records=batch_records, pipeline_stage="CROPPING", event_type="IMAGE_CROPPING")
+    crop_records = _build_batch_crop_ledger(
+        settings=settings,
+        batch_records=batch_records,
+        selected_by_job_id=selected_by_job_id,
+    )
+    validate_crop_indexes(crop_records)
+
+    _mark_batch_stage(db=db, batch_records=batch_records, pipeline_stage="EMBEDDING", event_type="IMAGE_EMBEDDING")
+    embedding_records = _embed_batch_crop_records(resources=resources, crop_records=crop_records)
+    validate_embedding_records(crop_records, embedding_records)
+    embedding_by_crop_index = {record.crop_index: record.vector for record in embedding_records}
+    crop_records_by_batch_index = group_crop_records_by_batch_index(crop_records)
+
     processed_by_job_id: dict[uuid.UUID, dict[str, Any]] = {}
     for record in batch_records:
-        processed_by_job_id[record.job_id] = _run_gpu_ingest_steps(
-            db=db,
+        processed_by_job_id[record.job_id] = _build_processed_from_crop_records(
+            record=record,
             resources=resources,
-            job_id=record.job_id,
-            image_id=record.image_id,
-            pil_image=record.pil_image,
-            payload=record.payload,
-            precomputed_detections=detections_by_job_id[record.job_id],
+            crop_records=crop_records_by_batch_index.get(record.batch_index, []),
+            embedding_by_crop_index=embedding_by_crop_index,
+            prepared=prepared_by_job_id[record.job_id],
         )
     return processed_by_job_id
+
+
+def _mark_batch_stage(
+    *,
+    db: DatabaseManager,
+    batch_records: list[BatchJobRecord],
+    pipeline_stage: str,
+    event_type: str,
+) -> None:
+    with db.session_scope() as session:
+        repo = ReIdRepository(session)
+        for record in batch_records:
+            repo.update_image_status(record.image_id, pipeline_stage=pipeline_stage)
+            repo.append_job_event(
+                job_id=record.job_id,
+                event_type=event_type,
+                payload={"image_id": record.image_id, "batch_index": record.batch_index},
+            )
+
+
+def _build_batch_crop_ledger(
+    *,
+    settings: Settings,
+    batch_records: list[BatchJobRecord],
+    selected_by_job_id: dict[uuid.UUID, list[tuple[int, DetectedInstance]]],
+) -> list[BatchCropRecord]:
+    crop_records: list[BatchCropRecord] = []
+    for record in batch_records:
+        selected_pairs = selected_by_job_id.get(record.job_id, [])
+        for selected_detection_index, (source_detection_index, detection) in enumerate(selected_pairs):
+            bb = NormalizedBBox(
+                x1=float(detection.x1),
+                y1=float(detection.y1),
+                x2=float(detection.x2),
+                y2=float(detection.y2),
+            )
+            bb = pad_bbox(bb, settings.crop_padding)
+            crop_records.append(
+                BatchCropRecord(
+                    crop_index=len(crop_records),
+                    batch_index=record.batch_index,
+                    image_id=record.image_id,
+                    source_detection_index=source_detection_index,
+                    selected_detection_index=selected_detection_index,
+                    detection=detection,
+                    bbox=bb,
+                    crop=crop_from_bbox(record.pil_image, bb),
+                )
+            )
+    return crop_records
+
+
+def _embed_batch_crop_records(
+    *,
+    resources: WorkerResources,
+    crop_records: list[BatchCropRecord],
+) -> list[BatchEmbeddingRecord]:
+    if not crop_records:
+        return []
+
+    batch_size = max(1, int(getattr(resources.settings, "embedder_crop_batch_size", 1)))
+    embedding_records: list[BatchEmbeddingRecord] = []
+    for chunk in iter_chunks(crop_records, batch_size):
+        records = list(chunk)
+        vectors = resources.embedder.embed_pil_images([record.crop for record in records])
+        if len(vectors) != len(records):
+            raise RuntimeError(f"Embedder returned {len(vectors)} vectors for {len(records)} crops")
+        for record, vector in zip(records, vectors, strict=True):
+            embedding_records.append(BatchEmbeddingRecord(crop_index=record.crop_index, vector=vector))
+    return embedding_records
+
+
+def _captured_at_ts_from_payload(payload: dict[str, Any]) -> int | None:
+    captured_at_raw = payload.get("captured_at")
+    if not captured_at_raw:
+        return None
+    try:
+        return int(datetime.fromisoformat(str(captured_at_raw).replace("Z", "+00:00")).timestamp())
+    except Exception:
+        return None
+
+
+def _build_processed_from_crop_records(
+    *,
+    record: BatchJobRecord,
+    resources: WorkerResources,
+    crop_records: list[BatchCropRecord],
+    embedding_by_crop_index: dict[int, Any],
+    prepared: dict[str, Any],
+) -> dict[str, Any]:
+    captured_at_ts = _captured_at_ts_from_payload(record.payload)
+    seed_registration = (
+        record.payload.get("seed_registration") if isinstance(record.payload.get("seed_registration"), dict) else None
+    )
+    model_version = resources.embedder.model_info.model_version
+    selected_seed_indexes: set[int] = set()
+    if seed_registration and crop_records:
+        apply_to_all = bool(seed_registration.get("apply_to_all_instances", False))
+        if apply_to_all:
+            selected_seed_indexes = set(range(len(crop_records)))
+        else:
+            selected_seed_indexes = {
+                max(range(len(crop_records)), key=lambda idx: float(crop_records[idx].detection.confidence))
+            }
+
+    points: list[qm.PointStruct] = []
+    meta_instances: list[dict[str, Any]] = []
+    for instance_index, crop_record in enumerate(crop_records):
+        d = crop_record.detection
+        bb = crop_record.bbox
+        point_uuid = uuid.uuid5(uuid.NAMESPACE_URL, f"{record.image_id}:instance:{instance_index}")
+        instance_id = f"ins_{point_uuid}"
+        emb_vec = embedding_by_crop_index[crop_record.crop_index].tolist()
+        species = _parse_species(int(d.class_id))
+        is_selected_seed = instance_index in selected_seed_indexes
+
+        point_payload = {
+            "daycare_id": record.payload.get("daycare_id"),
+            "trainer_id": record.payload.get("trainer_id"),
+            "image_id": record.image_id,
+            "image_role": record.image_role,
+            "captured_at_ts": captured_at_ts,
+            "species": species,
+            "class_id": int(d.class_id),
+            "det_conf": float(d.confidence),
+            "bbox": {"x1": bb.x1, "y1": bb.y1, "x2": bb.x2, "y2": bb.y2},
+            "embedding_type": "BODY",
+            "model_version": model_version,
+            "instance_id": instance_id,
+        }
+        meta_item = {
+            "instance_id": instance_id,
+            "class_id": int(d.class_id),
+            "species": species,
+            "confidence": float(d.confidence),
+            "bbox": {"x1": bb.x1, "y1": bb.y1, "x2": bb.x2, "y2": bb.y2},
+            "pet_id": None,
+        }
+        if seed_registration and is_selected_seed:
+            seed_pet_id = str(seed_registration.get("pet_id") or "").strip()
+            point_payload.update(
+                {
+                    "is_seed": True,
+                    "seed_pet_id": seed_pet_id,
+                    "seed_active": True,
+                    "seed_rank": None,
+                    "seed_note": "quick_upload",
+                    "seed_created_at_ts": int(_utcnow().timestamp()),
+                    "seed_created_by": seed_registration.get("updated_by"),
+                    "seed_updated_at_ts": int(_utcnow().timestamp()),
+                    "seed_updated_by": seed_registration.get("updated_by"),
+                    "pet_name": seed_registration.get("pet_name"),
+                }
+            )
+            if bool(seed_registration.get("sync_label", True)):
+                point_payload.update(
+                    {
+                        "pet_id": seed_pet_id,
+                        "assignment_status": "ACCEPTED",
+                        "label_source": "MANUAL",
+                        "label_confidence": 1.0,
+                        "labeled_at_ts": int(_utcnow().timestamp()),
+                        "labeled_by": seed_registration.get("updated_by"),
+                    }
+                )
+                meta_item.update(
+                    {
+                        "pet_id": seed_pet_id,
+                        "assignment_status": "ACCEPTED",
+                        "label_source": "MANUAL",
+                        "label_confidence": 1.0,
+                        "labeled_at_ts": int(_utcnow().timestamp()),
+                        "labeled_by": seed_registration.get("updated_by"),
+                    }
+                )
+        points.append(qm.PointStruct(id=str(point_uuid), vector=emb_vec, payload=point_payload))
+        meta_instances.append(meta_item)
+
+    return {
+        "points": points,
+        "instances": meta_instances,
+        "source_detections": prepared["source_detections"],
+        "source_detection_count": prepared["source_detection_count"],
+        "primary_source_detection_index": prepared["primary_source_detection_index"],
+        "model_version": model_version,
+        "width": record.width,
+        "height": record.height,
+    }
 
 
 def _fallback_detection() -> DetectedInstance:
