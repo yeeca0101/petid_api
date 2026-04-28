@@ -303,6 +303,20 @@ async def queue_summary(request: Request):
         "scheduler_local_capacity": settings.queue_local_capacity,
         "scheduler_max_inflight_jobs": settings.scheduler_max_inflight_jobs,
         "scheduler_micro_batching": bool(settings.scheduler_enable_micro_batching),
+        "ingest_batch_pipeline_enabled": bool(
+            settings.ingest_batch_pipeline_enabled or settings.ingest_batch_pipeline_mode != "single"
+        ),
+        "ingest_batch_pipeline_mode": settings.ingest_batch_pipeline_mode,
+        "ingest_pipeline_slots": settings.ingest_pipeline_slots,
+        "ingest_pipeline_local_queue_capacity": settings.ingest_pipeline_local_queue_capacity,
+        "ingest_job_batch_size": settings.ingest_job_batch_size,
+        "ingest_job_batch_max_wait_ms": settings.ingest_job_batch_max_wait_ms,
+        "detector_batch_size": settings.detector_batch_size,
+        "embedder_crop_batch_size": settings.embedder_crop_batch_size,
+        "effective_ingest_images_in_gpu_path": (
+            settings.ingest_pipeline_slots
+            * (settings.ingest_job_batch_size if settings.ingest_batch_pipeline_mode != "single" else 1)
+        ),
         "stale_job_count": len(stale_jobs),
         "stale_job_ids": [str(job.job_id) for job in stale_jobs[:20]],
     }

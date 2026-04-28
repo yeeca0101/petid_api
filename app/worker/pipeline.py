@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -393,6 +394,17 @@ def execute_ingest_pipeline_batch(
     if not batch_records:
         return outcomes
 
+    batch_id = uuid.uuid4().hex
+    batch_started = time.perf_counter()
+    logger.info(
+        "Ingest batch starting | batch_id=%s | job_count=%s | image_ids=%s | mode=%s | detector_batch_size=%s | embedder_crop_batch_size=%s",
+        batch_id,
+        len(batch_records),
+        ",".join(record.image_id for record in batch_records),
+        getattr(resources.settings, "ingest_batch_pipeline_mode", "single"),
+        getattr(resources.settings, "detector_batch_size", None),
+        getattr(resources.settings, "embedder_crop_batch_size", None),
+    )
     try:
         processed_by_job_id = scheduler.submit(
             SchedulerTask(
@@ -449,6 +461,12 @@ def execute_ingest_pipeline_batch(
 
     try:
         if all_points:
+            logger.info(
+                "Ingest batch upserting vectors | batch_id=%s | image_count=%s | qdrant_point_count=%s",
+                batch_id,
+                len(batch_records),
+                len(all_points),
+            )
             resources.store.upsert(all_points)
     except Exception as exc:
         for record in batch_records:
@@ -474,6 +492,13 @@ def execute_ingest_pipeline_batch(
             processed=processed_by_job_id[record.job_id],
         )
 
+    logger.info(
+        "Ingest batch finished | batch_id=%s | job_count=%s | qdrant_point_count=%s | duration_ms=%.2f",
+        batch_id,
+        len(batch_records),
+        len(all_points),
+        (time.perf_counter() - batch_started) * 1000.0,
+    )
     return outcomes
 
 
@@ -606,8 +631,11 @@ def _run_gpu_ingest_batch_steps(
     batch_records: list[BatchJobRecord],
 ) -> dict[uuid.UUID, dict[str, Any]]:
     settings = resources.settings
+    batch_started = time.perf_counter()
     _mark_batch_stage(db=db, batch_records=batch_records, pipeline_stage="DETECTING", event_type="IMAGE_DETECTING")
+    detector_started = time.perf_counter()
     detections_by_job_id = _detect_batch_for_records(resources=resources, batch_records=batch_records)
+    detector_ms = (time.perf_counter() - detector_started) * 1000.0
 
     prepared_by_job_id: dict[uuid.UUID, dict[str, Any]] = {}
     selected_by_job_id: dict[uuid.UUID, list[tuple[int, DetectedInstance]]] = {}
@@ -643,7 +671,9 @@ def _run_gpu_ingest_batch_steps(
     validate_crop_indexes(crop_records)
 
     _mark_batch_stage(db=db, batch_records=batch_records, pipeline_stage="EMBEDDING", event_type="IMAGE_EMBEDDING")
+    embed_started = time.perf_counter()
     embedding_records = _embed_batch_crop_records(resources=resources, crop_records=crop_records)
+    embed_ms = (time.perf_counter() - embed_started) * 1000.0
     validate_embedding_records(crop_records, embedding_records)
     embedding_by_crop_index = {record.crop_index: record.vector for record in embedding_records}
     crop_records_by_batch_index = group_crop_records_by_batch_index(crop_records)
@@ -657,6 +687,16 @@ def _run_gpu_ingest_batch_steps(
             embedding_by_crop_index=embedding_by_crop_index,
             prepared=prepared_by_job_id[record.job_id],
         )
+    logger.info(
+        "Ingest batch GPU steps finished | job_count=%s | crop_count=%s | detector_ms=%.2f | embed_ms=%.2f | total_ms=%.2f | detected_counts_by_image=%s | selected_counts_by_image=%s",
+        len(batch_records),
+        len(crop_records),
+        detector_ms,
+        embed_ms,
+        (time.perf_counter() - batch_started) * 1000.0,
+        {record.image_id: prepared_by_job_id[record.job_id]["source_detection_count"] for record in batch_records},
+        {record.image_id: len(selected_by_job_id[record.job_id]) for record in batch_records},
+    )
     return processed_by_job_id
 
 
@@ -864,11 +904,13 @@ def _detect_batch_for_records(
         return {record.job_id: [_fallback_detection()] for record in batch_records}
 
     batch_size = max(1, int(getattr(resources.settings, "detector_batch_size", 1)))
+    mode = str(getattr(resources.settings, "ingest_batch_pipeline_mode", "single"))
+    use_detector_batch = mode == "batch_full"
     detections_by_job_id: dict[uuid.UUID, list[DetectedInstance]] = {}
     for chunk in iter_chunks(batch_records, batch_size):
         records = list(chunk)
         images = [record.pil_image for record in records]
-        if hasattr(resources.detector, "detect_batch"):
+        if use_detector_batch and hasattr(resources.detector, "detect_batch"):
             detected_groups = resources.detector.detect_batch(images)
         else:
             detected_groups = [resources.detector.detect(image) for image in images]

@@ -54,6 +54,7 @@ class FakeModel:
 class FakeDetector:
     def __init__(self) -> None:
         self.batch_sizes: list[int] = []
+        self.single_calls = 0
 
     def detect_batch(self, images):
         self.batch_sizes.append(len(images))
@@ -61,6 +62,10 @@ class FakeDetector:
             [DetectedInstance(class_id=16, confidence=float(index), x1=0.1, y1=0.1, x2=0.9, y2=0.9)]
             for index, _image in enumerate(images)
         ]
+
+    def detect(self, image):
+        self.single_calls += 1
+        return [DetectedInstance(class_id=16, confidence=9.0, x1=0.1, y1=0.1, x2=0.9, y2=0.9)]
 
 
 @dataclass
@@ -144,13 +149,31 @@ class DetectorBatchMappingTest(unittest.TestCase):
     def test_pipeline_detector_chunking_preserves_batch_indexes(self) -> None:
         records = [_batch_record(index) for index in range(5)]
         detector = FakeDetector()
-        resources = SimpleNamespace(settings=SimpleNamespace(detector_batch_size=2), detector=detector)
+        resources = SimpleNamespace(
+            settings=SimpleNamespace(detector_batch_size=2, ingest_batch_pipeline_mode="batch_full"),
+            detector=detector,
+        )
 
         detections_by_job_id = _detect_batch_for_records(resources=resources, batch_records=records)
 
         self.assertEqual(detector.batch_sizes, [2, 2, 1])
         self.assertEqual(set(detections_by_job_id), {record.job_id for record in records})
         self.assertEqual([detections_by_job_id[record.job_id][0].confidence for record in records], [0.0, 1.0, 0.0, 1.0, 0.0])
+        self.assertEqual(detector.single_calls, 0)
+
+    def test_batch_embed_only_preserves_per_image_detector_calls(self) -> None:
+        records = [_batch_record(index) for index in range(3)]
+        detector = FakeDetector()
+        resources = SimpleNamespace(
+            settings=SimpleNamespace(detector_batch_size=8, ingest_batch_pipeline_mode="batch_embed_only"),
+            detector=detector,
+        )
+
+        detections_by_job_id = _detect_batch_for_records(resources=resources, batch_records=records)
+
+        self.assertEqual(detector.batch_sizes, [])
+        self.assertEqual(detector.single_calls, 3)
+        self.assertEqual([detections_by_job_id[record.job_id][0].confidence for record in records], [9.0, 9.0, 9.0])
 
     def test_seed_primary_detection_index_is_from_precomputed_source_detections(self) -> None:
         repo = FakeRepo(image_statuses=[], events=[])

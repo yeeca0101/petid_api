@@ -277,7 +277,15 @@ class Settings(BaseSettings):
     )
     ingest_batch_pipeline_enabled: bool = Field(
         default=False,
-        description="Enable the queue worker's batch ingest pipeline path.",
+        description="Legacy boolean to enable the queue worker's batch ingest pipeline path.",
+    )
+    ingest_batch_pipeline_mode: Literal["single", "batch_embed_only", "batch_full"] = Field(
+        default="single",
+        description=(
+            "Ingest worker runtime mode: single keeps one-job execution, "
+            "batch_embed_only batches queue jobs and crop embedding while preserving per-image detector calls, "
+            "batch_full also enables detector image batching."
+        ),
     )
     ingest_job_batch_size: int = Field(
         default=8,

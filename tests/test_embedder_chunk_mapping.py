@@ -85,6 +85,7 @@ class FakeEmbedder:
 
 def _settings(*, detector_batch_size: int = 8, embedder_crop_batch_size: int = 32):
     return SimpleNamespace(
+        ingest_batch_pipeline_mode="batch_full",
         detector_batch_size=detector_batch_size,
         embedder_crop_batch_size=embedder_crop_batch_size,
         apply_min_bbox_area_to_seed=False,
