@@ -467,43 +467,12 @@ def execute_ingest_pipeline_batch(
         return outcomes
 
     for record in batch_records:
-        processed = processed_by_job_id[record.job_id]
-        instance_rows = _processed_instance_rows(processed)
-        with db.session_scope() as session:
-            repo = ReIdRepository(session)
-            repo.replace_instances_for_image(record.image_id, instances=instance_rows)
-            repo.update_image_status(
-                record.image_id,
-                ingest_status="READY",
-                pipeline_stage="READY",
-                source_detection_count=processed["source_detection_count"],
-                primary_source_detection_index=processed["primary_source_detection_index"],
-            )
-            if record.request_id is not None:
-                repo.update_ingest_request_status(record.request_id, status="SUCCEEDED", image_id=record.image_id)
-            repo.append_job_event(
-                job_id=record.job_id,
-                event_type="IMAGE_READY",
-                payload={
-                    "image_id": record.image_id,
-                    "instance_count": len(instance_rows),
-                    "batch_index": record.batch_index,
-                },
-            )
-
-        _write_meta_sidecar(
-            settings=resources.settings,
-            image_id=record.image_id,
-            payload=record.payload,
-            processed=processed,
-            pil_image=record.pil_image,
-            raw_path=record.raw_path,
+        outcomes[record.job_id] = _finalize_processed_image(
+            db=db,
+            resources=resources,
+            record=record,
+            processed=processed_by_job_id[record.job_id],
         )
-        outcomes[record.job_id] = {
-            "image_id": record.image_id,
-            "instance_count": len(instance_rows),
-            "pipeline_stage": "READY",
-        }
 
     return outcomes
 
@@ -531,6 +500,75 @@ def _processed_instance_rows(processed: dict[str, Any]) -> list[dict[str, Any]]:
         }
         for item in processed["instances"]
     ]
+
+
+def _finalize_processed_image(
+    *,
+    db: DatabaseManager,
+    resources: WorkerResources,
+    record: BatchJobRecord,
+    processed: dict[str, Any],
+) -> BatchIngestOutcome:
+    instance_rows = _processed_instance_rows(processed)
+    try:
+        with db.session_scope() as session:
+            repo = ReIdRepository(session)
+            repo.replace_instances_for_image(record.image_id, instances=instance_rows)
+            repo.update_image_status(
+                record.image_id,
+                ingest_status="READY",
+                pipeline_stage="READY",
+                source_detection_count=processed["source_detection_count"],
+                primary_source_detection_index=processed["primary_source_detection_index"],
+            )
+            if record.request_id is not None:
+                repo.update_ingest_request_status(record.request_id, status="SUCCEEDED", image_id=record.image_id)
+            repo.append_job_event(
+                job_id=record.job_id,
+                event_type="IMAGE_READY",
+                payload={
+                    "image_id": record.image_id,
+                    "instance_count": len(instance_rows),
+                    "batch_index": record.batch_index,
+                },
+            )
+    except Exception as exc:
+        error_message = str(exc)
+        _mark_ingest_image_failed(
+            db=db,
+            job_id=record.job_id,
+            image_id=record.image_id,
+            request_id=record.request_id,
+            error_code="INGEST_PIPELINE_FINALIZE_ERROR",
+            error_message=error_message,
+        )
+        return BatchJobFailure(
+            error_code="INGEST_PIPELINE_FINALIZE_ERROR",
+            error_message=error_message,
+        )
+
+    try:
+        _write_meta_sidecar(
+            settings=resources.settings,
+            image_id=record.image_id,
+            payload=record.payload,
+            processed=processed,
+            pil_image=record.pil_image,
+            raw_path=record.raw_path,
+        )
+    except Exception:
+        logger.warning(
+            "Meta sidecar compatibility write failed after DB/Qdrant commit | image_id=%s | job_id=%s",
+            record.image_id,
+            record.job_id,
+            exc_info=True,
+        )
+
+    return {
+        "image_id": record.image_id,
+        "instance_count": len(instance_rows),
+        "pipeline_stage": "READY",
+    }
 
 
 def _mark_ingest_image_failed(
